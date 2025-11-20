@@ -110,6 +110,50 @@ func (x *Bid) GetAmount() int64 {
 	return 0
 }
 
+type ClientDetails struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClientDetails) Reset() {
+	*x = ClientDetails{}
+	mi := &file_proto_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClientDetails) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClientDetails) ProtoMessage() {}
+
+func (x *ClientDetails) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClientDetails.ProtoReflect.Descriptor instead.
+func (*ClientDetails) Descriptor() ([]byte, []int) {
+	return file_proto_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ClientDetails) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
 // Returns bid result, either "Success" or "Failure". Otherwise, if the auction is over, should return the winning bid
 type Result struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -120,7 +164,7 @@ type Result struct {
 
 func (x *Result) Reset() {
 	*x = Result{}
-	mi := &file_proto_proto_msgTypes[2]
+	mi := &file_proto_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -132,7 +176,7 @@ func (x *Result) String() string {
 func (*Result) ProtoMessage() {}
 
 func (x *Result) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_proto_msgTypes[2]
+	mi := &file_proto_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -145,7 +189,7 @@ func (x *Result) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Result.ProtoReflect.Descriptor instead.
 func (*Result) Descriptor() ([]byte, []int) {
-	return file_proto_proto_rawDescGZIP(), []int{2}
+	return file_proto_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Result) GetResult() string {
@@ -153,6 +197,50 @@ func (x *Result) GetResult() string {
 		return x.Result
 	}
 	return ""
+}
+
+type Port struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Port          int64                  `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Port) Reset() {
+	*x = Port{}
+	mi := &file_proto_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Port) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Port) ProtoMessage() {}
+
+func (x *Port) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Port.ProtoReflect.Descriptor instead.
+func (*Port) Descriptor() ([]byte, []int) {
+	return file_proto_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Port) GetPort() int64 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
 }
 
 var File_proto_proto protoreflect.FileDescriptor
@@ -163,12 +251,17 @@ const file_proto_proto_rawDesc = "" +
 	"\x05Empty\"-\n" +
 	"\x03Bid\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x16\n" +
-	"\x06amount\x18\x02 \x01(\x03R\x06amount\" \n" +
+	"\x06amount\x18\x02 \x01(\x03R\x06amount\"\x1f\n" +
+	"\rClientDetails\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\" \n" +
 	"\x06Result\x12\x16\n" +
-	"\x06result\x18\x01 \x01(\tR\x06result2P\n" +
-	"\x0eAuctionService\x12\x1e\n" +
-	"\aSendBid\x12\x04.Bid\x1a\a.Result\"\x00(\x010\x01\x12\x1e\n" +
-	"\tSendQuery\x12\x06.Empty\x1a\a.Result\"\x00B'Z%distributed_auction_system/grpc/protob\x06proto3"
+	"\x06result\x18\x01 \x01(\tR\x06result\"\x1a\n" +
+	"\x04Port\x12\x12\n" +
+	"\x04port\x18\x01 \x01(\x03R\x04port2t\n" +
+	"\x0eAuctionService\x12\x1a\n" +
+	"\asendBid\x12\x04.Bid\x1a\a.Result\"\x00\x12&\n" +
+	"\tsendQuery\x12\x0e.ClientDetails\x1a\a.Result\"\x00\x12\x1e\n" +
+	"\vreceivePort\x12\x06.Empty\x1a\x05.Port\"\x00B'Z%distributed_auction_system/grpc/protob\x06proto3"
 
 var (
 	file_proto_proto_rawDescOnce sync.Once
@@ -182,19 +275,23 @@ func file_proto_proto_rawDescGZIP() []byte {
 	return file_proto_proto_rawDescData
 }
 
-var file_proto_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_proto_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_proto_proto_goTypes = []any{
-	(*Empty)(nil),  // 0: Empty
-	(*Bid)(nil),    // 1: Bid
-	(*Result)(nil), // 2: Result
+	(*Empty)(nil),         // 0: Empty
+	(*Bid)(nil),           // 1: Bid
+	(*ClientDetails)(nil), // 2: ClientDetails
+	(*Result)(nil),        // 3: Result
+	(*Port)(nil),          // 4: Port
 }
 var file_proto_proto_depIdxs = []int32{
-	1, // 0: AuctionService.SendBid:input_type -> Bid
-	0, // 1: AuctionService.SendQuery:input_type -> Empty
-	2, // 2: AuctionService.SendBid:output_type -> Result
-	2, // 3: AuctionService.SendQuery:output_type -> Result
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
+	1, // 0: AuctionService.sendBid:input_type -> Bid
+	2, // 1: AuctionService.sendQuery:input_type -> ClientDetails
+	0, // 2: AuctionService.receivePort:input_type -> Empty
+	3, // 3: AuctionService.sendBid:output_type -> Result
+	3, // 4: AuctionService.sendQuery:output_type -> Result
+	4, // 5: AuctionService.receivePort:output_type -> Port
+	3, // [3:6] is the sub-list for method output_type
+	0, // [0:3] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -211,7 +308,7 @@ func file_proto_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_proto_rawDesc), len(file_proto_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

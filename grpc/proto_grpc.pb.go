@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AuctionService_SendBid_FullMethodName   = "/AuctionService/SendBid"
-	AuctionService_SendQuery_FullMethodName = "/AuctionService/SendQuery"
+	AuctionService_SendBid_FullMethodName     = "/AuctionService/sendBid"
+	AuctionService_SendQuery_FullMethodName   = "/AuctionService/sendQuery"
+	AuctionService_ReceivePort_FullMethodName = "/AuctionService/receivePort"
 )
 
 // AuctionServiceClient is the client API for AuctionService service.
@@ -29,8 +30,9 @@ const (
 //
 // For simplicity and data consistency, we always read and write from the Leader server. If this gets overloaded and crashes, we move to a new Leader.
 type AuctionServiceClient interface {
-	SendBid(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[Bid, Result], error)
-	SendQuery(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Result, error)
+	SendBid(ctx context.Context, in *Bid, opts ...grpc.CallOption) (*Result, error)
+	SendQuery(ctx context.Context, in *ClientDetails, opts ...grpc.CallOption) (*Result, error)
+	ReceivePort(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Port, error)
 }
 
 type auctionServiceClient struct {
@@ -41,23 +43,30 @@ func NewAuctionServiceClient(cc grpc.ClientConnInterface) AuctionServiceClient {
 	return &auctionServiceClient{cc}
 }
 
-func (c *auctionServiceClient) SendBid(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[Bid, Result], error) {
+func (c *auctionServiceClient) SendBid(ctx context.Context, in *Bid, opts ...grpc.CallOption) (*Result, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &AuctionService_ServiceDesc.Streams[0], AuctionService_SendBid_FullMethodName, cOpts...)
+	out := new(Result)
+	err := c.cc.Invoke(ctx, AuctionService_SendBid_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[Bid, Result]{ClientStream: stream}
-	return x, nil
+	return out, nil
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type AuctionService_SendBidClient = grpc.BidiStreamingClient[Bid, Result]
-
-func (c *auctionServiceClient) SendQuery(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Result, error) {
+func (c *auctionServiceClient) SendQuery(ctx context.Context, in *ClientDetails, opts ...grpc.CallOption) (*Result, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Result)
 	err := c.cc.Invoke(ctx, AuctionService_SendQuery_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *auctionServiceClient) ReceivePort(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Port, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Port)
+	err := c.cc.Invoke(ctx, AuctionService_ReceivePort_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -70,8 +79,9 @@ func (c *auctionServiceClient) SendQuery(ctx context.Context, in *Empty, opts ..
 //
 // For simplicity and data consistency, we always read and write from the Leader server. If this gets overloaded and crashes, we move to a new Leader.
 type AuctionServiceServer interface {
-	SendBid(grpc.BidiStreamingServer[Bid, Result]) error
-	SendQuery(context.Context, *Empty) (*Result, error)
+	SendBid(context.Context, *Bid) (*Result, error)
+	SendQuery(context.Context, *ClientDetails) (*Result, error)
+	ReceivePort(context.Context, *Empty) (*Port, error)
 	mustEmbedUnimplementedAuctionServiceServer()
 }
 
@@ -82,11 +92,14 @@ type AuctionServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAuctionServiceServer struct{}
 
-func (UnimplementedAuctionServiceServer) SendBid(grpc.BidiStreamingServer[Bid, Result]) error {
-	return status.Errorf(codes.Unimplemented, "method SendBid not implemented")
+func (UnimplementedAuctionServiceServer) SendBid(context.Context, *Bid) (*Result, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SendBid not implemented")
 }
-func (UnimplementedAuctionServiceServer) SendQuery(context.Context, *Empty) (*Result, error) {
+func (UnimplementedAuctionServiceServer) SendQuery(context.Context, *ClientDetails) (*Result, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SendQuery not implemented")
+}
+func (UnimplementedAuctionServiceServer) ReceivePort(context.Context, *Empty) (*Port, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReceivePort not implemented")
 }
 func (UnimplementedAuctionServiceServer) mustEmbedUnimplementedAuctionServiceServer() {}
 func (UnimplementedAuctionServiceServer) testEmbeddedByValue()                        {}
@@ -109,15 +122,26 @@ func RegisterAuctionServiceServer(s grpc.ServiceRegistrar, srv AuctionServiceSer
 	s.RegisterService(&AuctionService_ServiceDesc, srv)
 }
 
-func _AuctionService_SendBid_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(AuctionServiceServer).SendBid(&grpc.GenericServerStream[Bid, Result]{ServerStream: stream})
+func _AuctionService_SendBid_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Bid)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionServiceServer).SendBid(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionService_SendBid_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionServiceServer).SendBid(ctx, req.(*Bid))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type AuctionService_SendBidServer = grpc.BidiStreamingServer[Bid, Result]
-
 func _AuctionService_SendQuery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Empty)
+	in := new(ClientDetails)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -129,7 +153,25 @@ func _AuctionService_SendQuery_Handler(srv interface{}, ctx context.Context, dec
 		FullMethod: AuctionService_SendQuery_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AuctionServiceServer).SendQuery(ctx, req.(*Empty))
+		return srv.(AuctionServiceServer).SendQuery(ctx, req.(*ClientDetails))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuctionService_ReceivePort_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionServiceServer).ReceivePort(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionService_ReceivePort_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionServiceServer).ReceivePort(ctx, req.(*Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -142,17 +184,18 @@ var AuctionService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*AuctionServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "SendQuery",
+			MethodName: "sendBid",
+			Handler:    _AuctionService_SendBid_Handler,
+		},
+		{
+			MethodName: "sendQuery",
 			Handler:    _AuctionService_SendQuery_Handler,
 		},
-	},
-	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "SendBid",
-			Handler:       _AuctionService_SendBid_Handler,
-			ServerStreams: true,
-			ClientStreams: true,
+			MethodName: "receivePort",
+			Handler:    _AuctionService_ReceivePort_Handler,
 		},
 	},
+	Streams:  []grpc.StreamDesc{},
 	Metadata: "proto.proto",
 }

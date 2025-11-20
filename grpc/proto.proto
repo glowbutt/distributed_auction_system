@@ -18,9 +18,14 @@ message Result {
   string result = 1;
 }
 
+message Port {
+  int64 port = 1;
+}
+
 
 // For simplicity and data consistency, we always read and write from the Leader server. If this gets overloaded and crashes, we move to a new Leader.
 service AuctionService {
   rpc sendBid (Bid) returns (Result) {}
-  rpc sendQuery(ClientDetails) returns (Result) {}
+  rpc sendQuery (ClientDetails) returns (Result) {}
+  rpc receivePort (Empty) returns (Port) {}
 }
