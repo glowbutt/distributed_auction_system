@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	proto "auction-system/grpc"
@@ -22,8 +19,8 @@ import (
 const (
 	AuctionDuration    = 100 * time.Second //auction lasts
 	HeartbeatInterval  = 10 * time.Second  // nodes send heartbeat every 10 seconds
-	HeartbeatTimeout   = 15 * time.Second  // accepted timeframe with no heartbeat
-	ReplicationTimeout = 3 * time.Second   //??
+	HeartbeatTimeout   = 15 * time.Second  // accepted timeframe with no heartbeat from
+	ReplicationTimeout = 10 * time.Second  // maximum time we wait for syncing states and forwarding
 )
 
 type BidEntry struct {
@@ -95,16 +92,6 @@ func main() {
 
 	log.Printf("[%s] Server starting on port %s (leader=%v)", *nodeID, *port, *isLeader)
 	log.Printf("[%s] Auction will end at %v", *nodeID, server.auctionEndTime)
-
-	// handle graceful shutdown
-	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-		log.Printf("[%s] Shutting down...", *nodeID)
-		server.Close()
-		grpcServer.GracefulStop()
-	}()
 
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("[%s] Failed to serve: %v", *nodeID, err)
