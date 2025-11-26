@@ -43,20 +43,10 @@ message ReplicateBidResponse {
   bool success = 1;
 }
 
-message GetStateRequest {
-  string requester_id = 1;
-}
-
 message BidEntry {
   string bidder_id = 1;
   int32 amount = 2;
   int64 timestamp = 3;
-}
-
-message GetStateResponse {
-  repeated BidEntry bids = 1;
-  int64 auction_end_time = 2;
-  int64 sequence_number = 3;
 }
 
 message RemovePeerRequest {
@@ -89,5 +79,4 @@ service Replication {
   rpc MakeNewLeader(MakeNewLeaderRequest) returns (MakeNewLeaderResponse);
   rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
   rpc ReplicateBid(ReplicateBidRequest) returns (ReplicateBidResponse);
-  rpc GetState(GetStateRequest) returns (GetStateResponse);
 }
