@@ -259,10 +259,10 @@ func (n *AuctionNode) RemovePeer(ctx context.Context, req *proto.RemovePeerReque
 
 func (n *AuctionNode) processBid(req *proto.BidRequest) (*proto.BidResponse, error) {
 	if prev, ok := n.bids[req.BidderId]; ok && req.Amount <= prev {
-		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: fmt.Sprintf("higher than %d", prev)}, nil
+		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: fmt.Sprintf("must be higher than %d", prev)}, nil
 	}
 	if req.Amount <= n.highestBid {
-		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: fmt.Sprintf("higher than %d", n.highestBid)}, nil
+		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: fmt.Sprintf("must be higher than %d", n.highestBid)}, nil
 	}
 	n.seq++
 	n.bids[req.BidderId] = req.Amount
