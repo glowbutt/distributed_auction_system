@@ -1,4 +1,4 @@
-module main
+module auction-system
 
 go 1.25.1
 

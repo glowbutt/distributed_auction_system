@@ -1,31 +1,82 @@
 syntax = "proto3";
-option go_package = "distributed_auction_system/grpc/proto";
 
-message Empty {}
+package auction;
 
-message Bid {
-  // timestamp?
-  int64 id = 1;
-  int64 amount = 2;
+option go_package = "auction-system/proto";
+
+
+message BidRequest {
+  string bidder_id = 1;
+  int32 amount = 2;
 }
 
-message ClientDetails {
-  int64 id = 1;
+message BidResponse {
+  enum Status {
+    SUCCESS = 0;
+    FAIL = 1;
+    EXCEPTION = 2;
+  }
+  Status status = 1;
+  string message = 2;
 }
 
-// Returns bid result, either "Success" or "Failure". Otherwise, if the auction is over, should return the winning bid
-message Result {
-  string result = 1;
+message ResultRequest {
+  string bidder_id = 1;
 }
 
-message Port {
-  int64 port = 1;
+message ResultResponse {
+  bool auction_over = 1;
+  string winner = 2;
+  int32 highest_bid = 3;
+  string message = 4;
+}
+
+// Replication messages
+message ReplicateBidRequest {
+  string bidder_id = 1;
+  int32 amount = 2;
+  int64 timestamp = 3;
+  int64 sequence_number = 4;
+}
+
+message ReplicateBidResponse {
+  bool success = 1;
+}
+
+message BidEntry {
+  string bidder_id = 1;
+  int32 amount = 2;
+  int64 timestamp = 3;
+}
+
+message RemovePeerRequest {
+  string address = 1;
+}
+
+message RemovePeerResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message MakeNewLeaderRequest {
+  string address = 1;
+}
+
+message MakeNewLeaderResponse {
+  bool success = 1;
+  string message = 2;
 }
 
 
-// For simplicity and data consistency, we always read and write from the Leader server. If this gets overloaded and crashes, we move to a new Leader.
-service AuctionService {
-  rpc sendBid (Bid) returns (Result) {}
-  rpc sendQuery (ClientDetails) returns (Result) {}
-  rpc receivePort (Empty) returns (Port) {}
+// auction service for clients
+service Auction {
+  rpc Bid(BidRequest) returns (BidResponse);
+  rpc Result(ResultRequest) returns (ResultResponse);
+}
+
+// internal replication service between nodes
+service Replication {
+  rpc MakeNewLeader(MakeNewLeaderRequest) returns (MakeNewLeaderResponse);
+  rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
+  rpc ReplicateBid(ReplicateBidRequest) returns (ReplicateBidResponse);
 }
