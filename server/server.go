@@ -66,9 +66,7 @@ func main() {
 	go func() {
 		time.Sleep(2 * time.Second)
 		n.connectToPeers(pl)
-		if !*leader && n.leaderAddress != "" {
-			n.syncStateFromLeader()
-		}
+
 	}()
 	log.Printf("[%s] start port=%s leader=%v", n.nodeID, n.port, n.isLeader)
 	if err := s.Serve(lis); err != nil {
@@ -308,44 +306,6 @@ func (n *AuctionNode) ReplicateBid(ctx context.Context, req *proto.ReplicateBidR
 	n.seq = req.SequenceNumber
 	n.mutex.Unlock()
 	return &proto.ReplicateBidResponse{Success: true}, nil
-}
-
-func (n *AuctionNode) GetState(ctx context.Context, req *proto.GetStateRequest) (*proto.GetStateResponse, error) {
-	n.mutex.Lock()
-	bs := make([]*proto.BidEntry, 0, len(n.bids))
-	for id, v := range n.bids {
-		bs = append(bs, &proto.BidEntry{BidderId: id, Amount: v})
-	}
-	sn, ae := n.seq, n.auctionEnd.UnixNano()
-	n.mutex.Unlock()
-	return &proto.GetStateResponse{Bids: bs, AuctionEndTime: ae, SequenceNumber: sn}, nil
-}
-
-func (n *AuctionNode) syncStateFromLeader() {
-	if n.isLeader || n.leaderAddress == "" {
-		return
-	}
-	conn, err := grpc.NewClient(n.leaderAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	client := proto.NewReplicationClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
-	defer cancel()
-	if st, err := client.GetState(ctx, &proto.GetStateRequest{RequesterId: n.nodeID}); err == nil && st != nil {
-		n.mutex.Lock()
-		for _, b := range st.Bids {
-			n.bids[b.BidderId] = b.Amount
-			if b.Amount > n.highestBid {
-				n.highestBid = b.Amount
-				n.highestBidder = b.BidderId
-			}
-		}
-		n.seq = st.SequenceNumber
-		n.auctionEnd = time.Unix(0, st.AuctionEndTime)
-		n.mutex.Unlock()
-	}
 }
 
 func (n *AuctionNode) Close() {
