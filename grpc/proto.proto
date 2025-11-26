@@ -4,18 +4,6 @@ package auction;
 
 option go_package = "auction-system/proto";
 
-// Client-facing auction service
-service Auction {
-  rpc Bid(BidRequest) returns (BidResponse);
-  rpc Result(ResultRequest) returns (ResultResponse);
-}
-
-// Internal replication service between nodes
-service Replication {
-  rpc ReplicateBid(ReplicateBidRequest) returns (ReplicateBidResponse);
-  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
-  rpc GetState(GetStateRequest) returns (GetStateResponse);
-}
 
 message BidRequest {
   string bidder_id = 1;
@@ -79,4 +67,17 @@ message GetStateResponse {
   repeated BidEntry bids = 1;
   int64 auction_end_time = 2;
   int64 sequence_number = 3;
+}
+
+// auction service for clients
+service Auction {
+  rpc Bid(BidRequest) returns (BidResponse);
+  rpc Result(ResultRequest) returns (ResultResponse);
+}
+
+// internal replication service between nodes
+service Replication {
+  rpc ReplicateBid(ReplicateBidRequest) returns (ReplicateBidResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc GetState(GetStateRequest) returns (GetStateResponse);
 }
