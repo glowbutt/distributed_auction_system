@@ -2,206 +2,432 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
-	proto "main/grpc"
 	"net"
 	"os"
+	"os/signal"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	proto "auction-system/grpc"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-var (
-	logFile *os.File
-	logMu   sync.Mutex
-	logger  *log.Logger
+const (
+	AuctionDuration    = 100 * time.Second //auction lasts
+	HeartbeatInterval  = 10 * time.Second  // nodes send heartbeat every 10 seconds
+	HeartbeatTimeout   = 15 * time.Second  // accepted timeframe with no heartbeat
+	ReplicationTimeout = 3 * time.Second   //??
 )
 
-const nodeCount = 3
-
-var startPort = 8080
-
-var nodes []*Node
-
-// Contains the highest bidder and their bid.
-type Data struct {
-	bidID    int64
-	bidVALUE int64
+type BidEntry struct {
+	BidderID  string
+	Amount    int32
+	Timestamp int64
 }
-type Node struct {
-	proto.UnimplementedAuctionServiceServer
-	mutex sync.Mutex // Lock
-	id    int64
-	port  int64
 
-	isLeader    bool
-	isSync      bool
-	dataCh      chan Data
-	leaderCh    chan string         // Used by the synchronous server to send a reply to the Leader
-	connections map[int64]chan Data // Maps follower ID to Data channel
+type AuctionNode struct {
+	proto.UnimplementedAuctionServer
+	proto.UnimplementedReplicationServer
+
+	mutex         sync.Mutex
+	nodeID        string
+	isLeader      bool
+	leaderAddress string
+	peerAddresses []string
+	peerClients   map[string]proto.ReplicationClient
+	peerConns     map[string]*grpc.ClientConn
+
+	// Auction state
+	bids           map[string]int32 // bidderID -> highest bid
+	highestBid     int32
+	highestBidder  string
+	auctionEndTime time.Time
+	sequenceNumber int64
+
+	// For tracking registered bidders
+	registeredBidders map[string]bool
 }
 
 func main() {
-	// set up logging
-	var err error
-	logFile, err = os.OpenFile("server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	nodeID := flag.String("id", "node1", "Node ID")
+	port := flag.String("port", "8080", "Port to listen on")
+	isLeader := flag.Bool("leader", false, "Is this node the leader")
+	leaderAddr := flag.String("leader-addr", "", "Leader address (for followers)")
+	peers := flag.String("peers", "", "Comma-separated list of peer addresses")
+
+	flag.Parse()
+
+	var peerList []string
+	if *peers != "" {
+		peerList = strings.Split(*peers, ",")
+	}
+
+	server := startServer(*nodeID, *isLeader, *leaderAddr, peerList)
+
+	// Create gRPC server
+	lis, err := net.Listen("tcp", ":"+*port)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("[%s] Failed to listen: %v", *nodeID, err)
 	}
 
-	flags := log.Ldate | log.Ltime | log.Lmicroseconds
-	logger = log.New(logFile, "", flags)
-	defer logFile.Close()
-
-	// initial log
-	logger.Printf("Logging initialized")
-
-	// We start by assuming node 0 is the leader and node 1 is the synchronous follower (Semi-synchronous)
-	nodes := make([]*Node, nodeCount)
-	for i := 0; i < nodeCount; i++ {
-		port := startPort + i
-		n := &Node{
-			port:        int64(port),
-			id:          int64(i),
-			dataCh:      make(chan Data),
-			connections: nil, // Only leader needs a populated channelMap
-			leaderCh:    nil, // Only the synchronous follower needs to know the leader channel
-		}
-		nodes[i] = n
-		if nodes[0].id != n.id {
-			nodes[0].connections[n.id] = n.dataCh // Populate leaders connections
-		}
-		go n.startServer() // listener
-		logEvent(n, "Started server")
-	}
-	nodes[0].setSynchronousFollower()
-
-	// allow servers to properly start up
-	time.Sleep(100 * time.Millisecond)
-
-	// start connecting and run loops
-	for _, n := range nodes {
-		go n.run()
-	}
-
-	// block forever
-	select {}
-}
-
-// all nodes constantly await data
-func (n *Node) run() {
-	for {
-		n.updateData()
-	}
-}
-
-func (n *Node) sendQuery(ctx context.Context, req *proto.ClientDetails) (*proto.Result, error) {
-
-	// receive ID from ClientDetails
-	// Use ID to return current bid from map (n.bid_data[id])
-
-	return &proto.Result{Result: "Success"}, nil
-}
-
-// RPC function
-func (n *Node) bid(ctx context.Context, req *proto.Bid) (*proto.Result, error) {
-	bidderId := req.Id
-	amount := req.Amount
-
-	if amount > n.bid_VALUE {
-		n.mutex.Lock()
-		n.bid_VALUE = amount
-		n.bid_ID = bidderId
-		n.mutex.Unlock()
-		return &proto.Result{Result: "Success"}, nil
-	} else if amount <= n.bid_VALUE {
-		return &proto.Result{Result: "Failure, bid too low"}, nil
-	} else {
-		return &proto.Result{Result: "Exception"}, nil
-	}
-	//n.sendBid(int64(id), int64(amount))
-	//nodes[0].channelMap[n.id] = n.inputCh
-}
-
-func (n *Node) setSynchronousFollower() {
-	// use id from leader. Increment by one. (if the id doesnt exit, move on)
-	// Set the node with this ID (That is, Leader id + 1) to be the sync follower.
-	// To do that, set isSync = true and channelMap equal to Leader's channel map
-	// We also need to set a channel to the Leader, so we can respond, but dont know how to do this yet
-	// Set the sync follower leaderCh to be equal to the Leader's leaderCh
-
-	for i := n.id + 1; i < nodeCount; i++ {
-		if nodes[i] != nil {
-			follower := nodes[i]
-			follower.isSync = true
-			follower.leaderCh = n.leaderCh
-			follower.channelMap = n.channelMap
-		}
-	}
-}
-
-func (n *Node) sendDataToNodes() {
-	for _, c := range n.channelMap {
-		c <- n.bid_data
-	}
-	<-n.leaderCh // awaiting response from Synchronous server
-}
-
-func (n *Node) crash() {
-	// Add new node to queue so that we can always find a sync folower in SetSyncFollower
-}
-
-func (n *Node) failover() {
-
-}
-
-func (n *Node) updateData() {
-	// Waits for the input channel to be populated with new data (the newest mapping), then populates local bid_data
-	temp := <-n.inputCh
-	n.bid_data = temp
-
-	// If we are the leader, then we send our newly acquired data to everyones channels
-	if n.isLeader {
-		n.sendDataToNodes()
-	}
-
-	if n.isSync {
-		n.leaderCh <- "Data Updated Correctly"
-	}
-}
-
-// Should start server for a different address each time (8080, 8081...) one for each node
-// Server only handles receive and reply
-func (n *Node) startServer() {
-	addr := fmt.Sprintf(":%d", n.port) // so its not hardcoded anymore
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		logger.Fatalf("[ERROR]: %v", err)
-	}
-
-	// Makes new GRPC server
 	grpcServer := grpc.NewServer()
+	proto.RegisterAuctionServer(grpcServer, server)
+	proto.RegisterReplicationServer(grpcServer, server)
 
-	// Registers the grpc server with the System struct
-	proto.RegisterAuctionServiceServer(grpcServer, n)
-	log.Printf("node %d listening on %s\n", n.port, addr) //this is logged in the file as well on line 73
+	// Give time for other nodes to start, then connect
+	go func() {
+		time.Sleep(2 * time.Second)
+		server.connectToPeers()
 
-	err = grpcServer.Serve(listener)
-	if err != nil {
-		logger.Fatalf("[ERROR]: %v", err)
+		if !*isLeader {
+			server.syncStateFromLeader()
+		}
+
+		server.startHeartbeat()
+	}()
+
+	log.Printf("[%s] Server starting on port %s (leader=%v)", *nodeID, *port, *isLeader)
+	log.Printf("[%s] Auction will end at %v", *nodeID, server.auctionEndTime)
+
+	// handle graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		log.Printf("[%s] Shutting down...", *nodeID)
+		server.Close()
+		grpcServer.GracefulStop()
+	}()
+
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("[%s] Failed to serve: %v", *nodeID, err)
 	}
 }
 
-// ...interface means that function can accept any number of arguments of any type”
-func logEvent(n *Node, format string, args ...interface{}) {
-	logMu.Lock()
-	defer logMu.Unlock()
-	msg := fmt.Sprintf(format, args...)
-	logger.Printf(
-		"[NODE %d | port %d | state %d | lamport=%d], %s",
-		n.id, n.port, msg,
-	)
+func startServer(nodeID string, isLeader bool, leaderAddr string, peers []string) *AuctionNode {
+	return &AuctionNode{
+		nodeID:            nodeID,
+		isLeader:          isLeader,
+		leaderAddress:     leaderAddr,
+		peerAddresses:     peers,
+		peerClients:       make(map[string]proto.ReplicationClient),
+		peerConns:         make(map[string]*grpc.ClientConn),
+		bids:              make(map[string]int32),
+		registeredBidders: make(map[string]bool),
+		auctionEndTime:    time.Now().Add(AuctionDuration),
+	}
+}
+
+func (n *AuctionNode) connectToPeers() {
+	for _, addr := range n.peerAddresses {
+		if addr == "" {
+			continue
+		}
+		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("[%s] Failed to connect to peer %s: %v", n.nodeID, addr, err)
+			continue
+		}
+		n.peerConns[addr] = conn
+		n.peerClients[addr] = proto.NewReplicationClient(conn)
+		log.Printf("[%s] Connected to peer: %s", n.nodeID, addr)
+	}
+}
+
+func (n *AuctionNode) connectToLeader() proto.ReplicationClient {
+	if n.leaderAddress == "" {
+		return nil
+	}
+	conn, err := grpc.Dial(n.leaderAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Printf("[%s] Failed to connect to leader %s: %v", n.nodeID, n.leaderAddress, err)
+		return nil
+	}
+	return proto.NewReplicationClient(conn)
+}
+
+// Bid handles bid requests from clients
+func (n *AuctionNode) Bid(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	log.Printf("[%s] Received bid: bidder=%s, amount=%d", n.nodeID, req.BidderId, req.Amount)
+
+	// check if auction is over
+	if time.Now().After(n.auctionEndTime) {
+		return &proto.BidResponse{
+			Status:  proto.BidResponse_FAIL,
+			Message: "Auction has ended",
+		}, nil
+	}
+
+	// if not leader, forward to leader
+	if !n.isLeader {
+		return n.forwardBidToLeader(ctx, req)
+	}
+
+	// leader processes the bid
+	return n.processBid(req)
+}
+
+func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
+	n.mutex.Unlock() // we unlock while forwarding
+
+	client := n.connectToLeader()
+	if client == nil {
+		n.mutex.Lock()
+		return &proto.BidResponse{
+			Status:  proto.BidResponse_EXCEPTION,
+			Message: "Cannot reach leader",
+		}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, ReplicationTimeout)
+	defer cancel()
+
+	resp, err := proto.NewAuctionClient(n.peerConns[n.leaderAddress]).Bid(ctx, req)
+	n.mutex.Lock()
+
+	if err != nil {
+		return &proto.BidResponse{
+			Status:  proto.BidResponse_EXCEPTION,
+			Message: fmt.Sprintf("Leader communication failed: %v", err),
+		}, nil
+	}
+	return resp, nil
+}
+
+func (n *AuctionNode) processBid(req *proto.BidRequest) (*proto.BidResponse, error) {
+	// First bid registers the bidder
+	if !n.registeredBidders[req.BidderId] {
+		n.registeredBidders[req.BidderId] = true
+		log.Printf("[%s] Registered new bidder: %s", n.nodeID, req.BidderId)
+	}
+
+	// Check if bid is higher than bidder's previous bid
+	if prevBid, exists := n.bids[req.BidderId]; exists && req.Amount <= prevBid {
+		return &proto.BidResponse{
+			Status:  proto.BidResponse_FAIL,
+			Message: fmt.Sprintf("Bid must be higher than your previous bid of %d", prevBid),
+		}, nil
+	}
+
+	// Check if bid is higher than current highest
+	if req.Amount <= n.highestBid {
+		return &proto.BidResponse{
+			Status:  proto.BidResponse_FAIL,
+			Message: fmt.Sprintf("Bid must be higher than current highest bid of %d", n.highestBid),
+		}, nil
+	}
+
+	// Update state
+	n.sequenceNumber++
+	n.bids[req.BidderId] = req.Amount
+	n.highestBid = req.Amount
+	n.highestBidder = req.BidderId
+	timestamp := time.Now().UnixNano()
+
+	// replicate data to followers
+	n.replicateToFollowers(req.BidderId, req.Amount, timestamp, n.sequenceNumber)
+
+	return &proto.BidResponse{
+		Status:  proto.BidResponse_SUCCESS,
+		Message: fmt.Sprintf("Bid of %d accepted", req.Amount),
+	}, nil
+}
+
+func (n *AuctionNode) replicateToFollowers(bidderID string, amount int32, timestamp, seqNum int64) {
+	replicateReq := &proto.ReplicateBidRequest{
+		BidderId:       bidderID,
+		Amount:         amount,
+		Timestamp:      timestamp,
+		SequenceNumber: seqNum,
+	}
+
+	successCount := 1 // count self
+
+	for addr, client := range n.peerClients {
+		ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
+		resp, err := client.ReplicateBid(ctx, replicateReq)
+		cancel()
+
+		if err != nil {
+			log.Printf("[%s] Failed to replicate to %s: %v", n.nodeID, addr, err)
+			continue
+		}
+		if resp.Success {
+			successCount++
+		}
+	}
+
+	// Need majority for commit (with 3 nodes, need 2)
+	majority := (len(n.peerClients) + 2) / 2
+	if successCount >= majority {
+		log.Printf("[%s] Bid replicated to majority (%d/%d)", n.nodeID, successCount, len(n.peerClients)+1)
+	} else {
+		log.Printf("[%s] Warning: Bid only replicated to %d/%d nodes", n.nodeID, successCount, len(n.peerClients)+1)
+	}
+}
+
+// Result returns the current state or winner of the auction
+func (n *AuctionNode) Result(ctx context.Context, req *proto.ResultRequest) (*proto.ResultResponse, error) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	log.Printf("[%s] Result query from %s", n.nodeID, req.BidderId)
+
+	auctionOver := time.Now().After(n.auctionEndTime)
+
+	if auctionOver {
+		if n.highestBidder == "" {
+			return &proto.ResultResponse{
+				AuctionOver: true,
+				HighestBid:  0,
+				Message:     "Auction ended with no bids",
+			}, nil
+		}
+		return &proto.ResultResponse{
+			AuctionOver: true,
+			Winner:      n.highestBidder,
+			HighestBid:  n.highestBid,
+			Message:     fmt.Sprintf("Auction ended. Winner: %s with bid of %d", n.highestBidder, n.highestBid),
+		}, nil
+	}
+
+	return &proto.ResultResponse{
+		AuctionOver: false,
+		HighestBid:  n.highestBid,
+		Winner:      n.highestBidder,
+		Message:     fmt.Sprintf("Auction ongoing. Current highest bid: %d by %s", n.highestBid, n.highestBidder),
+	}, nil
+}
+
+// ReplicateBid handles replication requests from the leader
+func (n *AuctionNode) ReplicateBid(ctx context.Context, req *proto.ReplicateBidRequest) (*proto.ReplicateBidResponse, error) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	log.Printf("[%s] Replicating bid: bidder=%s, amount=%d, seq=%d",
+		n.nodeID, req.BidderId, req.Amount, req.SequenceNumber)
+
+	// Apply the bid
+	if !n.registeredBidders[req.BidderId] {
+		n.registeredBidders[req.BidderId] = true
+	}
+
+	n.bids[req.BidderId] = req.Amount
+	if req.Amount > n.highestBid {
+		n.highestBid = req.Amount
+		n.highestBidder = req.BidderId
+	}
+	n.sequenceNumber = req.SequenceNumber
+
+	return &proto.ReplicateBidResponse{Success: true}, nil
+}
+
+// Heartbeat handles heartbeat messages from leader
+func (n *AuctionNode) Heartbeat(ctx context.Context, req *proto.HeartbeatRequest) (*proto.HeartbeatResponse, error) {
+	log.Printf("[%s] Received heartbeat from leader %s", n.nodeID, req.LeaderId)
+	return &proto.HeartbeatResponse{
+		Acknowledged: true,
+		NodeId:       n.nodeID,
+	}, nil
+}
+
+// GetState returns the current state for synchronization
+func (n *AuctionNode) GetState(ctx context.Context, req *proto.GetStateRequest) (*proto.GetStateResponse, error) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	bids := make([]*proto.BidEntry, 0, len(n.bids))
+	for bidderID, amount := range n.bids {
+		bids = append(bids, &proto.BidEntry{
+			BidderId: bidderID,
+			Amount:   amount,
+		})
+	}
+
+	return &proto.GetStateResponse{
+		Bids:           bids,
+		AuctionEndTime: n.auctionEndTime.UnixNano(),
+		SequenceNumber: n.sequenceNumber,
+	}, nil
+}
+
+func (n *AuctionNode) startHeartbeat() {
+	if !n.isLeader {
+		return
+	}
+
+	ticker := time.NewTicker(HeartbeatInterval) //ticker is like an alarm that goes off repeatedly
+	go func() {
+		for range ticker.C { // every time there is a tick, send heartbeat to all followers
+			n.mutex.Lock()
+			for addr, client := range n.peerClients {
+				ctx, cancel := context.WithTimeout(context.Background(), HeartbeatTimeout) //5 second timer
+				_, err := client.Heartbeat(ctx, &proto.HeartbeatRequest{
+					LeaderId: n.nodeID,
+					Term:     1,
+				})
+				cancel()
+				if err != nil {
+					log.Printf("[%s] Heartbeat to %s failed: %v", n.nodeID, addr, err)
+				}
+			}
+			n.mutex.Unlock()
+		}
+	}()
+}
+
+func (n *AuctionNode) syncStateFromLeader() {
+	if n.isLeader || n.leaderAddress == "" {
+		return
+	}
+	//dial connects to another server over the network :-)
+	conn, err := grpc.Dial(n.leaderAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Printf("[%s] Cannot sync from leader: %v", n.nodeID, err)
+		return
+	}
+	defer conn.Close()
+
+	client := proto.NewReplicationClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
+	defer cancel()
+
+	state, err := client.GetState(ctx, &proto.GetStateRequest{RequesterId: n.nodeID})
+	if err != nil {
+		log.Printf("[%s] Failed to get state from leader: %v", n.nodeID, err)
+		return
+	}
+
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	for _, bid := range state.Bids {
+		n.registeredBidders[bid.BidderId] = true
+		n.bids[bid.BidderId] = bid.Amount
+		if bid.Amount > n.highestBid {
+			n.highestBid = bid.Amount
+			n.highestBidder = bid.BidderId
+		}
+	}
+	n.sequenceNumber = state.SequenceNumber
+	n.auctionEndTime = time.Unix(0, state.AuctionEndTime)
+
+	log.Printf("[%s] Synchronized state from leader: %d bids, seq=%d",
+		n.nodeID, len(state.Bids), state.SequenceNumber)
+}
+
+func (n *AuctionNode) Close() {
+	for _, conn := range n.peerConns {
+		conn.Close()
+	}
 }
