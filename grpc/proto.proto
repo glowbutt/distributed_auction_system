@@ -59,6 +59,25 @@ message GetStateResponse {
   int64 sequence_number = 3;
 }
 
+message RemovePeerRequest {
+  string address = 1;
+}
+
+message RemovePeerResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message MakeNewLeaderRequest {
+  string address = 1;
+}
+
+message MakeNewLeaderResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+
 // auction service for clients
 service Auction {
   rpc Bid(BidRequest) returns (BidResponse);
@@ -67,6 +86,8 @@ service Auction {
 
 // internal replication service between nodes
 service Replication {
+  rpc MakeNewLeader(MakeNewLeaderRequest) returns (MakeNewLeaderResponse);
+  rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
   rpc ReplicateBid(ReplicateBidRequest) returns (ReplicateBidResponse);
   rpc GetState(GetStateRequest) returns (GetStateResponse);
 }

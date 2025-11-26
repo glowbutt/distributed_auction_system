@@ -93,7 +93,7 @@ func main() {
 	}
 }
 
-func startServer(nodeID string, isLeader bool, leaderAddr string) *AuctionNode {
+func startServer(nodeID string, isLeader bool, leaderAddr string, port string) *AuctionNode {
 	return &AuctionNode{
 		nodeID:        nodeID,
 		isLeader:      isLeader,
@@ -157,63 +157,221 @@ func (n *AuctionNode) Bid(ctx context.Context, req *proto.BidRequest) (*proto.Bi
 	return n.processBid(req)
 }
 
-func (n *AuctionNode) makeNewLeader() {
-	// Take given node (n) and take its leader id. Make next id the leader
-	// Notify other nodes that the leader is dead (so that they can delete their connection to it)
-	//
-	var newLeader = ""
+// makeNewLeader chooses a replacement leader, removes the old leader connection,
+// and notifies all peers to update their local leaderAddress to newLeader.
+func (n *AuctionNode) makeNewLeader(oldLeaderAddr string) {
 
-	for addr, _ := range n.peerConns {
-		if addr == n.leaderAddress {
+	var newLeader string
+
+	// Copy peers under lock so we can use them without holding the lock while doing RPCs
+	n.mutex.Lock()
+	peers := make(map[string]*grpc.ClientConn, len(n.peerConns))
+	for a, c := range n.peerConns {
+		peers[a] = c
+	}
+	n.mutex.Unlock()
+
+	// Determine the next leader from the peers (skip the old leader)
+	for addr := range peers {
+		if addr == oldLeaderAddr {
 			continue
 		}
 		newLeader = addr
 		break
 	}
 
-	// We are the only node left
+	// If no other peer found, pick self
 	if newLeader == "" {
 		newLeader = n.port
 	}
 
-	if newLeader != "" {
-		n.leaderAddress = new()
+	// Remove old leader connection locally and tell others to drop it
+	// Bury will broadcast RemovePeer to others and remove locally
+	n.Bury(oldLeaderAddr)
+
+	// Update our own leaderAddress locally
+	n.mutex.Lock()
+	n.leaderAddress = newLeader
+	// set isLeader flag if self equals newLeader
+	n.isLeader = (newLeader == n.port)
+	n.mutex.Unlock()
+
+	// Broadcast the new leader to all peers (best-effort)
+	for addr, conn := range peers {
+		// skip if this peer is the old leader address we just removed; it's okay to try, but likely gone
+		client := proto.NewReplicationClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
+		_, err := client.MakeNewLeader(ctx, &proto.MakeNewLeaderRequest{Address: newLeader})
+		cancel()
+
+		if err != nil {
+			log.Printf("[%s] makeNewLeader: failed to notify %s of new leader %s: %v", n.nodeID, addr, newLeader, err)
+			continue
+		}
+		log.Printf("[%s] makeNewLeader: notified %s to set leader=%s", n.nodeID, addr, newLeader)
 	}
+
+	log.Printf("[%s] makeNewLeader: local leader set to %s (was %s)", n.nodeID, newLeader, oldLeaderAddr)
 }
 
-// remove dead connections
-func (n *AuctionNode) Bury(string address) {
-	n.peerConns[address] = nil
-	n.peerAddresses[address] = nil
+func (n *AuctionNode) MakeNewLeader(ctx context.Context, req *proto.MakeNewLeaderRequest) (*proto.MakeNewLeaderResponse, error) {
+	if req == nil || req.Address == "" {
+		return &proto.MakeNewLeaderResponse{Success: false, Message: "empty new_address"}, nil
+	}
+
+	n.mutex.Lock()
+	old := n.leaderAddress
+	n.leaderAddress = req.Address
+	n.isLeader = (n.leaderAddress == n.port)
+	n.mutex.Unlock()
+
+	log.Printf("[%s] MakeNewLeader RPC: leader changed from %s to %s (requested)", n.nodeID, old, req.Address)
+
+	// Optionally: proactively remove connection to old leader locally if present
+	if old != "" && old != req.Address {
+		n.mutex.Lock()
+		if conn, ok := n.peerConns[old]; ok {
+			_ = conn.Close()
+			delete(n.peerConns, old)
+			log.Printf("[%s] MakeNewLeader RPC: closed and removed old leader connection %s", n.nodeID, old)
+		}
+		n.mutex.Unlock()
+	}
+
+	return &proto.MakeNewLeaderResponse{Success: true, Message: "leader updated"}, nil
+}
+
+func (n *AuctionNode) Bury(address string) {
+	if address == "" {
+		return
+	}
+
+	// local map for safety stuff
+	n.mutex.Lock()
+	peers := make(map[string]*grpc.ClientConn, len(n.peerConns))
+	for a, c := range n.peerConns {
+		peers[a] = c
+	}
+	n.mutex.Unlock()
+
+	// Broadcast RemovePeer to all peers (best-effort).
+	for addr, conn := range peers {
+		client := proto.NewReplicationClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
+		_, err := client.RemovePeer(ctx, &proto.RemovePeerRequest{Address: address})
+		cancel()
+
+		if err != nil {
+			log.Printf("[%s] Bury: failed to notify %s to remove %s: %v", n.nodeID, addr, address, err)
+			// continue; best-effort
+		} else {
+			log.Printf("[%s] Bury: notified %s to remove %s", n.nodeID, addr, address)
+		}
+	}
+
+	n.mutex.Lock()
+	if conn, ok := n.peerConns[address]; ok {
+		_ = conn.Close()
+		delete(n.peerConns, address)
+		log.Printf("[%s] Bury: locally removed %s", n.nodeID, address)
+	} else {
+		log.Printf("[%s] Bury: local peer %s not present", n.nodeID, address)
+	}
+	n.mutex.Unlock()
+}
+
+func (n *AuctionNode) RemovePeer(ctx context.Context, req *proto.RemovePeerRequest) (*proto.RemovePeerResponse, error) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	addr := req.Address
+	if addr == "" {
+		return &proto.RemovePeerResponse{Success: false, Message: "empty address"}, nil
+	}
+
+	if conn, ok := n.peerConns[addr]; ok {
+		// best-effort close
+		_ = conn.Close()
+		delete(n.peerConns, addr)
+		log.Printf("[%s] Removed peer %s per remote request", n.nodeID, addr)
+		return &proto.RemovePeerResponse{Success: true, Message: "removed"}, nil
+	}
+	return &proto.RemovePeerResponse{Success: false, Message: "peer not found"}, nil
 }
 
 func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
-	n.mutex.Unlock() // we unlock while forwarding
+	// Caller (Bid) holds n.mutex. Release it immediately so we can do network I/O.
+	n.mutex.Unlock()
 
-	client := n.connectToLeader()
-	if client == nil {
+	// Snapshot leader info under lock (safe short critical section).
+	n.mutex.Lock()
+	leaderAddr := n.leaderAddress
+	var leaderConn *grpc.ClientConn
+	if leaderAddr != "" {
+		if c, ok := n.peerConns[leaderAddr]; ok {
+			leaderConn = c
+		}
+	}
+	n.mutex.Unlock()
+
+	// If no leader known, re-lock and return quickly.
+	if leaderAddr == "" {
 		n.mutex.Lock()
 		return &proto.BidResponse{
 			Status:  proto.BidResponse_EXCEPTION,
-			Message: "Cannot reach leader",
+			Message: "No leader known",
 		}, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, ReplicationTimeout)
-	defer cancel()
+	// Prepare an Auction client: prefer an existing persistent connection.
+	var auctionClient proto.AuctionClient
+	var tempConn *grpc.ClientConn // for temporary dials we must close later
 
-	resp, err := proto.NewAuctionClient(n.peerConns[n.leaderAddress]).Bid(ctx, req)
-	// ctx carries 10 second timer used to determine status of leader
-	// Leader is dead, we make a new leader from a next given server
-	n.makeNewLeader()
-	n.mutex.Lock()
+	if leaderConn != nil {
+		auctionClient = proto.NewAuctionClient(leaderConn)
+	} else {
+		// No persistent connection: try a short DialContext so we fail fast if unreachable.
+		dialCtx, dialCancel := context.WithTimeout(ctx, 2*time.Second)
+		conn, err := grpc.DialContext(dialCtx, leaderAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		dialCancel()
+		if err != nil {
+			// Don't block — start election asynchronously and return exception to client.
+			go func(addr string) { n.makeNewLeader(addr) }(leaderAddr)
+
+			n.mutex.Lock()
+			return &proto.BidResponse{
+				Status:  proto.BidResponse_EXCEPTION,
+				Message: fmt.Sprintf("Cannot reach leader: %v", err),
+			}, nil
+		}
+		tempConn = conn
+		auctionClient = proto.NewAuctionClient(conn)
+	}
+
+	// Perform the Bid RPC with a timeout (so RPC doesn't hang forever).
+	rpcCtx, rpcCancel := context.WithTimeout(ctx, ReplicationTimeout)
+	resp, err := auctionClient.Bid(rpcCtx, req)
+	rpcCancel()
+
+	// Close the temporary connection if we created one.
+	if tempConn != nil {
+		_ = tempConn.Close()
+	}
 
 	if err != nil {
+		// Log for operators, trigger election asynchronously, then return quickly.
+		log.Printf("[%s] forwardBidToLeader: leader %s failed: %v", n.nodeID, leaderAddr, err)
+		go func(addr string) { n.makeNewLeader(addr) }(leaderAddr)
+
+		n.mutex.Lock()
 		return &proto.BidResponse{
 			Status:  proto.BidResponse_EXCEPTION,
 			Message: fmt.Sprintf("Leader communication failed: %v", err),
 		}, nil
 	}
+
+	// Success — re-acquire the lock before returning to the caller (Bid expects the lock held).
+	n.mutex.Lock()
 	return resp, nil
 }
 
@@ -249,14 +407,13 @@ func (n *AuctionNode) processBid(req *proto.BidRequest) (*proto.BidResponse, err
 
 	// replicate data to followers
 	n.replicateToFollowers(req.BidderId, req.Amount, timestamp, n.sequenceNumber)
-
 	return &proto.BidResponse{
 		Status:  proto.BidResponse_SUCCESS,
 		Message: fmt.Sprintf("Bid of %d accepted", req.Amount),
 	}, nil
 }
 
-func (n *AuctionNode) replicateToFollowers(bidderID string, amount int32, timestamp, seqNum int64) {
+func (n *AuctionNode) replicateToFollowers(bidderID string, amount int32, timestamp, seqNum int64) (isMajority bool, numOfSuccesses int) {
 	replicateReq := &proto.ReplicateBidRequest{
 		BidderId:       bidderID,
 		Amount:         amount,
@@ -264,6 +421,7 @@ func (n *AuctionNode) replicateToFollowers(bidderID string, amount int32, timest
 		SequenceNumber: seqNum,
 	}
 
+	isMajority = false
 	successCount := 1 // count self
 
 	for addr, c := range n.peerConns {
@@ -281,13 +439,15 @@ func (n *AuctionNode) replicateToFollowers(bidderID string, amount int32, timest
 		}
 	}
 
-	// Need majority for commit (with 3 nodes, need 2)
+	// log whether majority has replicated or not. Asynchronous
 	majority := (len(n.peerConns) + 2) / 2
 	if successCount >= majority {
 		log.Printf("[%s] Bid replicated to majority (%d/%d)", n.nodeID, successCount, len(n.peerConns)+1)
+		isMajority = true
 	} else {
 		log.Printf("[%s] Warning: Bid only replicated to %d/%d nodes", n.nodeID, successCount, len(n.peerConns)+1)
 	}
+	return isMajority, successCount
 }
 
 // Result returns the current state or winner of the auction
