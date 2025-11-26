@@ -34,7 +34,7 @@ func (ac *AuctionClient) connect() error {
 	if ac.conn != nil {
 		_ = ac.conn.Close()
 	}
-	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", ac.host, ac.port), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", ac.host, ac.port), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		ac.port++
 		return err
