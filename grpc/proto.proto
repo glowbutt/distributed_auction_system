@@ -43,16 +43,6 @@ message ReplicateBidResponse {
   bool success = 1;
 }
 
-message HeartbeatRequest {
-  string leader_id = 1;
-  int64 term = 2;
-}
-
-message HeartbeatResponse {
-  bool acknowledged = 1;
-  string node_id = 2;
-}
-
 message GetStateRequest {
   string requester_id = 1;
 }
@@ -78,6 +68,5 @@ service Auction {
 // internal replication service between nodes
 service Replication {
   rpc ReplicateBid(ReplicateBidRequest) returns (ReplicateBidResponse);
-  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc GetState(GetStateRequest) returns (GetStateResponse);
 }

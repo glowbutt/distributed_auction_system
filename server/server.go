@@ -34,10 +34,9 @@ type AuctionNode struct {
 	mutex         sync.Mutex
 	nodeID        string
 	isLeader      bool
-	addr          string
+	port          string
 	leaderAddress string
 	peerAddresses []string
-	peerClients   map[string]proto.ReplicationClient
 	peerConns     map[string]*grpc.ClientConn
 
 	// Auction state
@@ -65,8 +64,7 @@ func main() {
 		peerList = strings.Split(*peers, ",")
 	}
 
-	server := startServer(*nodeID, *isLeader, *leaderAddr, peerList)
-
+	server := startServer(*nodeID, *isLeader, *leaderAddr, *port)
 	// Create gRPC server
 	lis, err := net.Listen("tcp", ":"+*port)
 	if err != nil {
@@ -80,7 +78,7 @@ func main() {
 	// Give time for other nodes to start, then connect
 	go func() {
 		time.Sleep(2 * time.Second)
-		server.connectToPeers()
+		server.connectToPeers(peerList)
 
 		if !*isLeader {
 			server.syncStateFromLeader()
@@ -95,12 +93,12 @@ func main() {
 	}
 }
 
-func startServer(nodeID string, isLeader bool, leaderAddr string, peers []string) *AuctionNode {
+func startServer(nodeID string, isLeader bool, leaderAddr string) *AuctionNode {
 	return &AuctionNode{
 		nodeID:        nodeID,
 		isLeader:      isLeader,
 		leaderAddress: leaderAddr,
-		addr:          port,
+		port:          port,
 		peerConns:     make(map[string]*grpc.ClientConn),
 		bids:          make(map[string]int32),
 		//registeredBidders: make(map[string]bool),
@@ -108,18 +106,17 @@ func startServer(nodeID string, isLeader bool, leaderAddr string, peers []string
 	}
 }
 
-func (n *AuctionNode) connectToPeers() {
-	for _, addr := range n.peerAddresses {
+func (n *AuctionNode) connectToPeers(peers []string) {
+	for _, addr := range peers {
 		if addr == "" {
 			continue
 		}
-		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Printf("[%s] Failed to connect to peer %s: %v", n.nodeID, addr, err)
 			continue
 		}
 		n.peerConns[addr] = conn
-		n.peerClients[addr] = proto.NewReplicationClient(conn)
 		log.Printf("[%s] Connected to peer: %s", n.nodeID, addr)
 	}
 }
@@ -128,7 +125,7 @@ func (n *AuctionNode) connectToLeader() proto.ReplicationClient {
 	if n.leaderAddress == "" {
 		return nil
 	}
-	conn, err := grpc.Dial(n.leaderAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(n.leaderAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Printf("[%s] Failed to connect to leader %s: %v", n.nodeID, n.leaderAddress, err)
 		return nil
@@ -158,6 +155,36 @@ func (n *AuctionNode) Bid(ctx context.Context, req *proto.BidRequest) (*proto.Bi
 
 	// leader processes the bid
 	return n.processBid(req)
+}
+
+func (n *AuctionNode) makeNewLeader() {
+	// Take given node (n) and take its leader id. Make next id the leader
+	// Notify other nodes that the leader is dead (so that they can delete their connection to it)
+	//
+	var newLeader = ""
+
+	for addr, _ := range n.peerConns {
+		if addr == n.leaderAddress {
+			continue
+		}
+		newLeader = addr
+		break
+	}
+
+	// We are the only node left
+	if newLeader == "" {
+		newLeader = n.port
+	}
+
+	if newLeader != "" {
+		n.leaderAddress = new()
+	}
+}
+
+// remove dead connections
+func (n *AuctionNode) Bury(string address) {
+	n.peerConns[address] = nil
+	n.peerAddresses[address] = nil
 }
 
 func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
@@ -239,7 +266,8 @@ func (n *AuctionNode) replicateToFollowers(bidderID string, amount int32, timest
 
 	successCount := 1 // count self
 
-	for addr, client := range n.peerClients {
+	for addr, c := range n.peerConns {
+		client := proto.NewReplicationClient(c)
 		ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
 		resp, err := client.ReplicateBid(ctx, replicateReq)
 		cancel()
@@ -254,11 +282,11 @@ func (n *AuctionNode) replicateToFollowers(bidderID string, amount int32, timest
 	}
 
 	// Need majority for commit (with 3 nodes, need 2)
-	majority := (len(n.peerClients) + 2) / 2
+	majority := (len(n.peerConns) + 2) / 2
 	if successCount >= majority {
-		log.Printf("[%s] Bid replicated to majority (%d/%d)", n.nodeID, successCount, len(n.peerClients)+1)
+		log.Printf("[%s] Bid replicated to majority (%d/%d)", n.nodeID, successCount, len(n.peerConns)+1)
 	} else {
-		log.Printf("[%s] Warning: Bid only replicated to %d/%d nodes", n.nodeID, successCount, len(n.peerClients)+1)
+		log.Printf("[%s] Warning: Bid only replicated to %d/%d nodes", n.nodeID, successCount, len(n.peerConns)+1)
 	}
 }
 
@@ -342,8 +370,9 @@ func (n *AuctionNode) syncStateFromLeader() {
 	if n.isLeader || n.leaderAddress == "" {
 		return
 	}
-	//dial connects to another server over the network :-)
-	conn, err := grpc.Dial(n.leaderAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
+	// connect to leader
+	conn, err := grpc.NewClient(n.leaderAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Printf("[%s] Cannot sync from leader: %v", n.nodeID, err)
 		return
