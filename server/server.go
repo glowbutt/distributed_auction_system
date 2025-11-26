@@ -151,6 +151,47 @@ func (n *AuctionNode) triggerElectionIfNeeded(failed string) {
 	}
 }
 
+// returns the current auction state or winner
+func (n *AuctionNode) Result(ctx context.Context, req *proto.ResultRequest) (*proto.ResultResponse, error) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	log.Printf("[%s] Result query from %s", n.nodeID, req.BidderId)
+
+	auctionOver := time.Now().After(n.auctionEnd)
+
+	if auctionOver {
+		if n.highestBidder == "" {
+			return &proto.ResultResponse{
+				AuctionOver: true,
+				HighestBid:  0,
+				Message:     "Auction ended with no bids",
+			}, nil
+		}
+		return &proto.ResultResponse{
+			AuctionOver: true,
+			Winner:      n.highestBidder,
+			HighestBid:  n.highestBid,
+			Message:     fmt.Sprintf("Auction ended.  Winner: %s with bid of %d", n.highestBidder, n.highestBid),
+		}, nil
+	}
+
+	if n.highestBidder == "" {
+		return &proto.ResultResponse{
+			AuctionOver: false,
+			HighestBid:  0,
+			Message:     "Auction ongoing.  No bids yet",
+		}, nil
+	}
+
+	return &proto.ResultResponse{
+		AuctionOver: false,
+		Winner:      n.highestBidder,
+		HighestBid:  n.highestBid,
+		Message:     fmt.Sprintf("Auction ongoing. Highest bid: %d by %s", n.highestBid, n.highestBidder),
+	}, nil
+}
+
 func (n *AuctionNode) makeNewLeader(old string) {
 	n.mutex.Lock()
 	if n.leaderAddress != old {

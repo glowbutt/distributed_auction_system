@@ -60,6 +60,22 @@ func (ac *AuctionClient) Bid(amount int32) (*proto.BidResponse, error) {
 	}
 }
 
+func (ac *AuctionClient) Result() (*proto.ResultResponse, error) {
+	for {
+		if ac.client == nil {
+			_ = ac.connect()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+		resp, err := ac.client.Result(ctx, &proto.ResultRequest{BidderId: ac.id})
+		cancel()
+		if err != nil {
+			ac.client = nil
+			continue
+		}
+		return resp, nil
+	}
+}
+
 func main() {
 	id := flag.String("id", "", "Bidder ID")
 	host := flag.String("host", "localhost", "Server host")
@@ -76,7 +92,10 @@ func main() {
 
 	fmt.Println("=== Auction Client ===")
 	fmt.Printf("Bidder ID: %s\n", *id)
-	fmt.Println("Enter bids (e.g., '15' or 'bid 15'):")
+	fmt.Println("Commands:")
+	fmt.Println("  bid <amount>  - Place a bid")
+	fmt.Println("  result        - Check auction status")
+	fmt.Println("  quit          - Exit")
 
 	for {
 		fmt.Print("> ")
@@ -89,25 +108,76 @@ func main() {
 			continue
 		}
 
-		// Parse input
 		parts := strings.Fields(text)
-		var amtStr string
-		if len(parts) == 1 {
-			amtStr = parts[0]
-		} else if len(parts) == 2 && strings.ToLower(parts[0]) == "bid" {
+		cmd := strings.ToLower(parts[0])
+
+		switch cmd {
+		case "bid":
+			var amtStr string
+			if len(parts) == 1 {
+				fmt.Println("Usage: bid <amount>")
+				continue
+			}
 			amtStr = parts[1]
-		} else {
-			fmt.Println("Invalid input. Type a number or 'bid <amount>'.")
-			continue
-		}
 
-		amt, err := strconv.Atoi(amtStr)
-		if err != nil {
-			fmt.Println("Invalid number")
-			continue
-		}
+			amt, err := strconv.Atoi(amtStr)
+			if err != nil {
+				fmt.Println("Invalid number")
+				continue
+			}
 
-		resp, _ := client.Bid(int32(amt))
-		fmt.Printf("\n%s\n\n", resp.Message)
+			resp, _ := client.Bid(int32(amt))
+			switch resp.Status {
+			case proto.BidResponse_SUCCESS:
+				fmt.Printf("✓ %s\n", resp.Message)
+			case proto.BidResponse_FAIL:
+				fmt.Printf("✗ %s\n", resp.Message)
+			case proto.BidResponse_EXCEPTION:
+				fmt.Printf("⚠ %s\n", resp.Message)
+			}
+
+		case "result":
+			resp, _ := client.Result()
+			fmt.Println("________________________")
+			if resp.AuctionOver {
+				fmt.Println("  AUCTION ENDED")
+				if resp.Winner != "" {
+					fmt.Printf("  Winner: %s\n", resp.Winner)
+					fmt.Printf("  Winning bid: %d\n", resp.HighestBid)
+				} else {
+					fmt.Println("  No winner (no bids)")
+				}
+			} else {
+				fmt.Println("  AUCTION IN PROGRESS")
+				if resp.HighestBid > 0 {
+					fmt.Printf("  Highest bid: %d\n", resp.HighestBid)
+					fmt.Printf("  Leader: %s\n", resp.Winner)
+				} else {
+					fmt.Println("  No bids yet")
+				}
+			}
+			fmt.Println("________________________")
+
+		case "quit", "exit":
+			fmt.Println("Goodbye!")
+			return
+
+		default:
+			// Try parsing as just a number (original behavior)
+			amt, err := strconv.Atoi(cmd)
+			if err != nil {
+				fmt.Println("Unknown command.  Try: bid <amount>, result, quit")
+				continue
+			}
+			resp, _ := client.Bid(int32(amt))
+			switch resp.Status {
+			case proto.BidResponse_SUCCESS:
+				fmt.Printf("✓ %s\n", resp.Message)
+			case proto.BidResponse_FAIL:
+				fmt.Printf("✗ %s\n", resp.Message)
+			case proto.BidResponse_EXCEPTION:
+				fmt.Printf("⚠ %s\n", resp.Message)
+			}
+		}
 	}
 }

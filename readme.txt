@@ -15,4 +15,4 @@ How to run:
     go run client/client.go -id=bob -startport=8081
 
 
-5) start bidding away by writing:
+5) start bidding away by writing an integer amount! it must be higher than the previous amount.
