@@ -17,9 +17,7 @@ import (
 )
 
 const (
-	AuctionDuration    = 100 * time.Second //auction lasts
-	HeartbeatInterval  = 10 * time.Second  // nodes send heartbeat every 10 seconds
-	HeartbeatTimeout   = 15 * time.Second  // accepted timeframe with no heartbeat from
+	AuctionDuration    = 200 * time.Second //auction lasts
 	ReplicationTimeout = 10 * time.Second  // maximum time we wait for syncing states and forwarding
 )
 
@@ -36,6 +34,7 @@ type AuctionNode struct {
 	mutex         sync.Mutex
 	nodeID        string
 	isLeader      bool
+	addr          string
 	leaderAddress string
 	peerAddresses []string
 	peerClients   map[string]proto.ReplicationClient
@@ -86,8 +85,6 @@ func main() {
 		if !*isLeader {
 			server.syncStateFromLeader()
 		}
-
-		server.startHeartbeat()
 	}()
 
 	log.Printf("[%s] Server starting on port %s (leader=%v)", *nodeID, *port, *isLeader)
@@ -100,15 +97,14 @@ func main() {
 
 func startServer(nodeID string, isLeader bool, leaderAddr string, peers []string) *AuctionNode {
 	return &AuctionNode{
-		nodeID:            nodeID,
-		isLeader:          isLeader,
-		leaderAddress:     leaderAddr,
-		peerAddresses:     peers,
-		peerClients:       make(map[string]proto.ReplicationClient),
-		peerConns:         make(map[string]*grpc.ClientConn),
-		bids:              make(map[string]int32),
-		registeredBidders: make(map[string]bool),
-		auctionEndTime:    time.Now().Add(AuctionDuration),
+		nodeID:        nodeID,
+		isLeader:      isLeader,
+		leaderAddress: leaderAddr,
+		addr:          port,
+		peerConns:     make(map[string]*grpc.ClientConn),
+		bids:          make(map[string]int32),
+		//registeredBidders: make(map[string]bool),
+		auctionEndTime: time.Now().Add(AuctionDuration),
 	}
 }
 
@@ -180,6 +176,9 @@ func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequ
 	defer cancel()
 
 	resp, err := proto.NewAuctionClient(n.peerConns[n.leaderAddress]).Bid(ctx, req)
+	// ctx carries 10 second timer used to determine status of leader
+	// Leader is dead, we make a new leader from a next given server
+	n.makeNewLeader()
 	n.mutex.Lock()
 
 	if err != nil {
@@ -193,10 +192,10 @@ func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequ
 
 func (n *AuctionNode) processBid(req *proto.BidRequest) (*proto.BidResponse, error) {
 	// First bid registers the bidder
-	if !n.registeredBidders[req.BidderId] {
-		n.registeredBidders[req.BidderId] = true
-		log.Printf("[%s] Registered new bidder: %s", n.nodeID, req.BidderId)
-	}
+	//if !n.registeredBidders[req.BidderId] {
+	//	n.registeredBidders[req.BidderId] = true
+	//	log.Printf("[%s] Registered new bidder: %s", n.nodeID, req.BidderId)
+	//}
 
 	// Check if bid is higher than bidder's previous bid
 	if prevBid, exists := n.bids[req.BidderId]; exists && req.Amount <= prevBid {
@@ -305,9 +304,9 @@ func (n *AuctionNode) ReplicateBid(ctx context.Context, req *proto.ReplicateBidR
 		n.nodeID, req.BidderId, req.Amount, req.SequenceNumber)
 
 	// Apply the bid
-	if !n.registeredBidders[req.BidderId] {
-		n.registeredBidders[req.BidderId] = true
-	}
+	//if !n.registeredBidders[req.BidderId] {
+	//	n.registeredBidders[req.BidderId] = true
+	//}
 
 	n.bids[req.BidderId] = req.Amount
 	if req.Amount > n.highestBid {
@@ -317,15 +316,6 @@ func (n *AuctionNode) ReplicateBid(ctx context.Context, req *proto.ReplicateBidR
 	n.sequenceNumber = req.SequenceNumber
 
 	return &proto.ReplicateBidResponse{Success: true}, nil
-}
-
-// Heartbeat handles heartbeat messages from leader
-func (n *AuctionNode) Heartbeat(ctx context.Context, req *proto.HeartbeatRequest) (*proto.HeartbeatResponse, error) {
-	log.Printf("[%s] Received heartbeat from leader %s", n.nodeID, req.LeaderId)
-	return &proto.HeartbeatResponse{
-		Acknowledged: true,
-		NodeId:       n.nodeID,
-	}, nil
 }
 
 // GetState returns the current state for synchronization
@@ -346,31 +336,6 @@ func (n *AuctionNode) GetState(ctx context.Context, req *proto.GetStateRequest) 
 		AuctionEndTime: n.auctionEndTime.UnixNano(),
 		SequenceNumber: n.sequenceNumber,
 	}, nil
-}
-
-func (n *AuctionNode) startHeartbeat() {
-	if !n.isLeader {
-		return
-	}
-
-	ticker := time.NewTicker(HeartbeatInterval) //ticker is like an alarm that goes off repeatedly
-	go func() {
-		for range ticker.C { // every time there is a tick, send heartbeat to all followers
-			n.mutex.Lock()
-			for addr, client := range n.peerClients {
-				ctx, cancel := context.WithTimeout(context.Background(), HeartbeatTimeout) //5 second timer
-				_, err := client.Heartbeat(ctx, &proto.HeartbeatRequest{
-					LeaderId: n.nodeID,
-					Term:     1,
-				})
-				cancel()
-				if err != nil {
-					log.Printf("[%s] Heartbeat to %s failed: %v", n.nodeID, addr, err)
-				}
-			}
-			n.mutex.Unlock()
-		}
-	}()
 }
 
 func (n *AuctionNode) syncStateFromLeader() {
@@ -399,7 +364,7 @@ func (n *AuctionNode) syncStateFromLeader() {
 	defer n.mutex.Unlock()
 
 	for _, bid := range state.Bids {
-		n.registeredBidders[bid.BidderId] = true
+		//n.registeredBidders[bid.BidderId] = true
 		n.bids[bid.BidderId] = bid.Amount
 		if bid.Amount > n.highestBid {
 			n.highestBid = bid.Amount
