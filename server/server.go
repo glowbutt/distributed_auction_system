@@ -297,19 +297,94 @@ func (n *AuctionNode) RemovePeer(ctx context.Context, req *proto.RemovePeerReque
 }
 
 func (n *AuctionNode) processBid(req *proto.BidRequest) (*proto.BidResponse, error) {
+	// Validate bid (under n.mutex from Bid)
 	if prev, ok := n.bids[req.BidderId]; ok && req.Amount <= prev {
-		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: fmt.Sprintf("must be higher than %d", prev)}, nil
+		return &proto.BidResponse{Status: proto.BidResponse_FAIL,
+			Message: fmt.Sprintf("must be higher than %d", prev)}, nil
 	}
 	if req.Amount <= n.highestBid {
-		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: fmt.Sprintf("must be higher than %d", n.highestBid)}, nil
+		return &proto.BidResponse{Status: proto.BidResponse_FAIL,
+			Message: fmt.Sprintf("must be higher than %d", n.highestBid)}, nil
 	}
+
+	// snapshot of current state so we can roll back if quorum not reached
+	prevSeq := n.seq
+	prevHighest := n.highestBid
+	prevHighestBidder := n.highestBidder
+	prevBidValue, hadPrevBid := n.bids[req.BidderId]
+
+	// Tentatively apply locally
 	n.seq++
 	n.bids[req.BidderId] = req.Amount
 	n.highestBid = req.Amount
 	n.highestBidder = req.BidderId
-	ts := time.Now().UnixNano()
-	go n.replicateToFollowers(req.BidderId, req.Amount, ts, n.seq)
-	return &proto.BidResponse{Status: proto.BidResponse_SUCCESS, Message: fmt.Sprintf("Bid of %d accepted", req.Amount)}, nil
+
+	// Replicate to followers and wait for majority
+	totalNodes := len(n.peerConns) + 1
+	majority := totalNodes/2 + 1
+
+	if totalNodes == 1 {
+		log.Printf("[%s] only one node: quorum for (1/1), seq=%d bidder=%s amount=%d)",
+			n.nodeID, n.seq, req.BidderId, req.Amount)
+		return &proto.BidResponse{
+			Status:  proto.BidResponse_SUCCESS,
+			Message: fmt.Sprintf("Bid of %d accepted", req.Amount),
+		}, nil
+	}
+
+	acks := 1 // count leader itself
+	log.Printf("[%s] Leader replicating seq=%d bidder=%s amount=%d; need majority %d/%d",
+		n.nodeID, n.seq, req.BidderId, req.Amount, majority, totalNodes)
+
+	//contacting followers synchronously
+	for addr, conn := range n.peerConns {
+		if conn == nil {
+			continue
+		}
+		client := proto.NewReplicationClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
+		resp, err := client.ReplicateBid(ctx, &proto.ReplicateBidRequest{
+			BidderId:       req.BidderId,
+			Amount:         req.Amount,
+			Timestamp:      time.Now().UnixNano(),
+			SequenceNumber: n.seq,
+		})
+		cancel()
+
+		if err == nil && resp != nil && resp.Success {
+			acks++
+			log.Printf("[%s] ACK from %s (%d/%d needed=%d) for seq=%d",
+				n.nodeID, addr, acks, totalNodes, majority, n.seq)
+		} else {
+			log.Printf("[%s] replicate to %s failed for seq=%d: %v",
+				n.nodeID, addr, n.seq, err)
+		}
+
+		if acks >= majority {
+			log.Printf("[%s] quorum reached (%d/%d) for seq=%d; committing",
+				n.nodeID, acks, totalNodes, n.seq)
+			return &proto.BidResponse{
+				Status:  proto.BidResponse_SUCCESS,
+				Message: fmt.Sprintf("Bid of %d accepted", req.Amount),
+			}, nil
+		}
+	}
+	// quorum not reached: roll back tentative state
+	if hadPrevBid {
+		n.bids[req.BidderId] = prevBidValue
+	} else {
+		delete(n.bids, req.BidderId)
+	}
+	n.highestBid = prevHighest
+	n.highestBidder = prevHighestBidder
+	n.seq = prevSeq
+
+	log.Printf("[%s] quorum NOT reached (%d/%d) for seq=%d; rolled back",
+		n.nodeID, acks, totalNodes, prevSeq)
+	return &proto.BidResponse{
+		Status:  proto.BidResponse_FAIL,
+		Message: "Could not replicate to majority",
+	}, nil
 }
 
 func (n *AuctionNode) replicateToFollowers(bidder string, amount int32, ts, seq int64) {
@@ -344,8 +419,14 @@ func (n *AuctionNode) ReplicateBid(ctx context.Context, req *proto.ReplicateBidR
 		n.highestBid = req.Amount
 		n.highestBidder = req.BidderId
 	}
-	n.seq = req.SequenceNumber
+	// Keep sequence monotonic by taking the max
+	if req.SequenceNumber > n.seq {
+		n.seq = req.SequenceNumber
+	}
+	log.Printf("[%s] follower applied replicate seq=%d bidder=%s amount=%d -> sending ACK",
+		n.nodeID, req.SequenceNumber, req.BidderId, req.Amount)
 	n.mutex.Unlock()
+
 	return &proto.ReplicateBidResponse{Success: true}, nil
 }
 
