@@ -651,6 +651,118 @@ func (x *MakeNewLeaderResponse) GetMessage() string {
 	return ""
 }
 
+type RequestVoteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          int64                  `protobuf:"varint,1,opt,name=Term,proto3" json:"Term,omitempty"`
+	CandidateId   string                 `protobuf:"bytes,2,opt,name=CandidateId,proto3" json:"CandidateId,omitempty"`
+	LastSeq       int64                  `protobuf:"varint,3,opt,name=LastSeq,proto3" json:"LastSeq,omitempty"` // last applied sequence number / log index for up-to-dateness check
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestVoteRequest) Reset() {
+	*x = RequestVoteRequest{}
+	mi := &file_proto_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestVoteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestVoteRequest) ProtoMessage() {}
+
+func (x *RequestVoteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestVoteRequest.ProtoReflect.Descriptor instead.
+func (*RequestVoteRequest) Descriptor() ([]byte, []int) {
+	return file_proto_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *RequestVoteRequest) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *RequestVoteRequest) GetCandidateId() string {
+	if x != nil {
+		return x.CandidateId
+	}
+	return ""
+}
+
+func (x *RequestVoteRequest) GetLastSeq() int64 {
+	if x != nil {
+		return x.LastSeq
+	}
+	return 0
+}
+
+type RequestVoteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          int64                  `protobuf:"varint,1,opt,name=Term,proto3" json:"Term,omitempty"`               // the responder's current term (may be updated)
+	VoteGranted   bool                   `protobuf:"varint,2,opt,name=VoteGranted,proto3" json:"VoteGranted,omitempty"` // true if vote granted to candidate
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestVoteResponse) Reset() {
+	*x = RequestVoteResponse{}
+	mi := &file_proto_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestVoteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestVoteResponse) ProtoMessage() {}
+
+func (x *RequestVoteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestVoteResponse.ProtoReflect.Descriptor instead.
+func (*RequestVoteResponse) Descriptor() ([]byte, []int) {
+	return file_proto_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RequestVoteResponse) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *RequestVoteResponse) GetVoteGranted() bool {
+	if x != nil {
+		return x.VoteGranted
+	}
+	return false
+}
+
 var File_proto_proto protoreflect.FileDescriptor
 
 const file_proto_proto_rawDesc = "" +
@@ -695,11 +807,19 @@ const file_proto_proto_rawDesc = "" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\"K\n" +
 	"\x15MakeNewLeaderResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage2v\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"d\n" +
+	"\x12RequestVoteRequest\x12\x12\n" +
+	"\x04Term\x18\x01 \x01(\x03R\x04Term\x12 \n" +
+	"\vCandidateId\x18\x02 \x01(\tR\vCandidateId\x12\x18\n" +
+	"\aLastSeq\x18\x03 \x01(\x03R\aLastSeq\"K\n" +
+	"\x13RequestVoteResponse\x12\x12\n" +
+	"\x04Term\x18\x01 \x01(\x03R\x04Term\x12 \n" +
+	"\vVoteGranted\x18\x02 \x01(\bR\vVoteGranted2v\n" +
 	"\aAuction\x120\n" +
 	"\x03Bid\x12\x13.auction.BidRequest\x1a\x14.auction.BidResponse\x129\n" +
-	"\x06Result\x12\x16.auction.ResultRequest\x1a\x17.auction.ResultResponse2\xf1\x01\n" +
-	"\vReplication\x12N\n" +
+	"\x06Result\x12\x16.auction.ResultRequest\x1a\x17.auction.ResultResponse2\xbb\x02\n" +
+	"\vReplication\x12H\n" +
+	"\vRequestVote\x12\x1b.auction.RequestVoteRequest\x1a\x1c.auction.RequestVoteResponse\x12N\n" +
 	"\rMakeNewLeader\x12\x1d.auction.MakeNewLeaderRequest\x1a\x1e.auction.MakeNewLeaderResponse\x12E\n" +
 	"\n" +
 	"RemovePeer\x12\x1a.auction.RemovePeerRequest\x1a\x1b.auction.RemovePeerResponse\x12K\n" +
@@ -718,7 +838,7 @@ func file_proto_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_proto_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_proto_proto_goTypes = []any{
 	(BidResponse_Status)(0),       // 0: auction.BidResponse.Status
 	(*BidRequest)(nil),            // 1: auction.BidRequest
@@ -732,21 +852,25 @@ var file_proto_proto_goTypes = []any{
 	(*RemovePeerResponse)(nil),    // 9: auction.RemovePeerResponse
 	(*MakeNewLeaderRequest)(nil),  // 10: auction.MakeNewLeaderRequest
 	(*MakeNewLeaderResponse)(nil), // 11: auction.MakeNewLeaderResponse
+	(*RequestVoteRequest)(nil),    // 12: auction.RequestVoteRequest
+	(*RequestVoteResponse)(nil),   // 13: auction.RequestVoteResponse
 }
 var file_proto_proto_depIdxs = []int32{
 	0,  // 0: auction.BidResponse.status:type_name -> auction.BidResponse.Status
 	1,  // 1: auction.Auction.Bid:input_type -> auction.BidRequest
 	3,  // 2: auction.Auction.Result:input_type -> auction.ResultRequest
-	10, // 3: auction.Replication.MakeNewLeader:input_type -> auction.MakeNewLeaderRequest
-	8,  // 4: auction.Replication.RemovePeer:input_type -> auction.RemovePeerRequest
-	5,  // 5: auction.Replication.ReplicateBid:input_type -> auction.ReplicateBidRequest
-	2,  // 6: auction.Auction.Bid:output_type -> auction.BidResponse
-	4,  // 7: auction.Auction.Result:output_type -> auction.ResultResponse
-	11, // 8: auction.Replication.MakeNewLeader:output_type -> auction.MakeNewLeaderResponse
-	9,  // 9: auction.Replication.RemovePeer:output_type -> auction.RemovePeerResponse
-	6,  // 10: auction.Replication.ReplicateBid:output_type -> auction.ReplicateBidResponse
-	6,  // [6:11] is the sub-list for method output_type
-	1,  // [1:6] is the sub-list for method input_type
+	12, // 3: auction.Replication.RequestVote:input_type -> auction.RequestVoteRequest
+	10, // 4: auction.Replication.MakeNewLeader:input_type -> auction.MakeNewLeaderRequest
+	8,  // 5: auction.Replication.RemovePeer:input_type -> auction.RemovePeerRequest
+	5,  // 6: auction.Replication.ReplicateBid:input_type -> auction.ReplicateBidRequest
+	2,  // 7: auction.Auction.Bid:output_type -> auction.BidResponse
+	4,  // 8: auction.Auction.Result:output_type -> auction.ResultResponse
+	13, // 9: auction.Replication.RequestVote:output_type -> auction.RequestVoteResponse
+	11, // 10: auction.Replication.MakeNewLeader:output_type -> auction.MakeNewLeaderResponse
+	9,  // 11: auction.Replication.RemovePeer:output_type -> auction.RemovePeerResponse
+	6,  // 12: auction.Replication.ReplicateBid:output_type -> auction.ReplicateBidResponse
+	7,  // [7:13] is the sub-list for method output_type
+	1,  // [1:7] is the sub-list for method input_type
 	1,  // [1:1] is the sub-list for extension type_name
 	1,  // [1:1] is the sub-list for extension extendee
 	0,  // [0:1] is the sub-list for field type_name
@@ -763,7 +887,7 @@ func file_proto_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_proto_rawDesc), len(file_proto_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

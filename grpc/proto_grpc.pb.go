@@ -163,6 +163,7 @@ var Auction_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	Replication_RequestVote_FullMethodName   = "/auction.Replication/RequestVote"
 	Replication_MakeNewLeader_FullMethodName = "/auction.Replication/MakeNewLeader"
 	Replication_RemovePeer_FullMethodName    = "/auction.Replication/RemovePeer"
 	Replication_ReplicateBid_FullMethodName  = "/auction.Replication/ReplicateBid"
@@ -174,6 +175,7 @@ const (
 //
 // internal replication service between nodes
 type ReplicationClient interface {
+	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
 	MakeNewLeader(ctx context.Context, in *MakeNewLeaderRequest, opts ...grpc.CallOption) (*MakeNewLeaderResponse, error)
 	RemovePeer(ctx context.Context, in *RemovePeerRequest, opts ...grpc.CallOption) (*RemovePeerResponse, error)
 	ReplicateBid(ctx context.Context, in *ReplicateBidRequest, opts ...grpc.CallOption) (*ReplicateBidResponse, error)
@@ -185,6 +187,16 @@ type replicationClient struct {
 
 func NewReplicationClient(cc grpc.ClientConnInterface) ReplicationClient {
 	return &replicationClient{cc}
+}
+
+func (c *replicationClient) RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RequestVoteResponse)
+	err := c.cc.Invoke(ctx, Replication_RequestVote_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *replicationClient) MakeNewLeader(ctx context.Context, in *MakeNewLeaderRequest, opts ...grpc.CallOption) (*MakeNewLeaderResponse, error) {
@@ -223,6 +235,7 @@ func (c *replicationClient) ReplicateBid(ctx context.Context, in *ReplicateBidRe
 //
 // internal replication service between nodes
 type ReplicationServer interface {
+	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
 	MakeNewLeader(context.Context, *MakeNewLeaderRequest) (*MakeNewLeaderResponse, error)
 	RemovePeer(context.Context, *RemovePeerRequest) (*RemovePeerResponse, error)
 	ReplicateBid(context.Context, *ReplicateBidRequest) (*ReplicateBidResponse, error)
@@ -236,6 +249,9 @@ type ReplicationServer interface {
 // pointer dereference when methods are called.
 type UnimplementedReplicationServer struct{}
 
+func (UnimplementedReplicationServer) RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RequestVote not implemented")
+}
 func (UnimplementedReplicationServer) MakeNewLeader(context.Context, *MakeNewLeaderRequest) (*MakeNewLeaderResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MakeNewLeader not implemented")
 }
@@ -264,6 +280,24 @@ func RegisterReplicationServer(s grpc.ServiceRegistrar, srv ReplicationServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&Replication_ServiceDesc, srv)
+}
+
+func _Replication_RequestVote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RequestVoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicationServer).RequestVote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Replication_RequestVote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicationServer).RequestVote(ctx, req.(*RequestVoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _Replication_MakeNewLeader_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -327,6 +361,10 @@ var Replication_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "auction.Replication",
 	HandlerType: (*ReplicationServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RequestVote",
+			Handler:    _Replication_RequestVote_Handler,
+		},
 		{
 			MethodName: "MakeNewLeader",
 			Handler:    _Replication_MakeNewLeader_Handler,
