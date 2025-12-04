@@ -133,8 +133,8 @@ func (n *AuctionNode) Bid(ctx context.Context, req *proto.BidRequest) (*proto.Bi
 	return n.processBid(ctx, req)
 }
 
-// forwardBidToLeader forwards to the node in n.leaderAddress; dials with grpc.NewClient if needed.
-// If leader missing/unreachable it triggers an election and retries until deadline.
+// forwardBidToLeader forwards to the node in n.leaderAddress
+// If leader missing/unreachable it triggers an election and retries until deadline
 func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -179,7 +179,7 @@ func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequ
 		// remote failed: trigger election and retry
 		go n.triggerElectionIfNeeded(leader)
 		if time.Now().After(deadline) {
-			return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader unreachable"}, nil
+			return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader not reached"}, nil
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -220,8 +220,8 @@ func (n *AuctionNode) Result(ctx context.Context, req *proto.ResultRequest) (*pr
 	return &proto.ResultResponse{AuctionOver: false, Winner: n.highestBidder, HighestBid: n.highestBid, Message: fmt.Sprintf("Auction ongoing. Highest bid: %d by %s", n.highestBid, n.highestBidder)}, nil
 }
 
-// startElection implements a simple term/vote election and becomes leader only if majority votes.
-// This prevents split-brain by requiring majority.
+// startElection implements an election and becomes leader only if majority votes
+// should prevent split-brain by requiring majority
 func (n *AuctionNode) startElection() {
 	// Snapshot peers & state
 	n.mutex.Lock()
@@ -256,7 +256,6 @@ func (n *AuctionNode) startElection() {
 		if stored != nil {
 			conn = stored
 		} else {
-			// short new client
 			c, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				log.Printf("[%s] RequestVote: connect %s failed: %v", n.nodeID, addr, err)
@@ -283,10 +282,10 @@ func (n *AuctionNode) startElection() {
 			continue
 		}
 
-		// If peer has higher term, step down and adopt
+		// If peer has higher term, step down
 		n.mutex.Lock()
 		if resp.Term > n.term {
-			log.Printf("[%s] discovered higher term %d from %s (was %d); stepping down", n.nodeID, resp.Term, addr, n.term)
+			log.Printf("[%s] discovered higher term %d from %s (was %d), stepping down from election", n.nodeID, resp.Term, addr, n.term)
 			n.term = resp.Term
 			n.votedFor = ""
 			n.isLeader = false
@@ -309,7 +308,7 @@ func (n *AuctionNode) startElection() {
 		return
 	}
 
-	// Won election: become leader
+	// won election: become leader
 	n.mutex.Lock()
 	prev := n.leaderAddress
 	n.leaderAddress = selfAddr
@@ -319,7 +318,7 @@ func (n *AuctionNode) startElection() {
 
 	log.Printf("[%s] WON election term=%d votes=%d/%d -> leader=%s", n.nodeID, term, votes, totalNodes, selfAddr)
 
-	// Notify peers (best-effort)
+	// notifying peers
 	for _, addr := range peers {
 		n.mutex.Lock()
 		stored := n.peerConns[addr]
@@ -355,7 +354,7 @@ func (n *AuctionNode) startElection() {
 	log.Printf("[%s] leader changed %s -> %s", n.nodeID, prev, n.leaderAddress)
 }
 
-// MakeNewLeader RPC - follower updates leader info
+// MakeNewLeader RPC: follower updates leader info
 func (n *AuctionNode) MakeNewLeader(ctx context.Context, req *proto.MakeNewLeaderRequest) (*proto.MakeNewLeaderResponse, error) {
 	if req == nil || req.Address == "" {
 		return &proto.MakeNewLeaderResponse{Success: false, Message: "empty"}, nil
@@ -382,12 +381,12 @@ func (n *AuctionNode) RequestVote(ctx context.Context, req *proto.RequestVoteReq
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
-	// stale term -> reject
+	// reject old term
 	if req.Term < n.term {
 		return &proto.RequestVoteResponse{Term: n.term, VoteGranted: false}, nil
 	}
 
-	// adopt higher term
+	// use higher term
 	if req.Term > n.term {
 		n.term = req.Term
 		n.votedFor = ""
@@ -451,9 +450,9 @@ func (n *AuctionNode) RemovePeer(ctx context.Context, req *proto.RemovePeerReque
 	return &proto.RemovePeerResponse{Success: false, Message: "notfound"}, nil
 }
 
-// processBid replicates synchronously to a majority before confirming to client.
+// processBid replicates synchronously to a majority before confirming to client
 func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
-	// validate & apply tentatively under lock
+	// validate and apply under lock
 	n.mutex.Lock()
 	if prev, ok := n.bids[req.BidderId]; ok && req.Amount <= prev {
 		n.mutex.Unlock()
@@ -482,7 +481,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 	}
 	n.mutex.Unlock()
 
-	// build reachable connections (use grpc.NewClient when needed)
+	// build reachable connections (use grpc.NewClient if needed)
 	reachable := make(map[string]*grpc.ClientConn, len(peerAddrs))
 	for _, addr := range peerAddrs {
 		n.mutex.Lock()
@@ -615,7 +614,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 		}
 	}
 
-	// quorum not reached -> rollback
+	// majority not reached -> rollback
 	n.mutex.Lock()
 	if hadPrevBid {
 		n.bids[req.BidderId] = prevBidValue
@@ -627,7 +626,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 	n.seq = prevSeq
 	n.mutex.Unlock()
 
-	log.Printf("[%s] quorum NOT reached (%d/%d reachable) for seq=%d; rolled back", n.nodeID, acks, totalReachable, prevSeq)
+	log.Printf("[%s] majority NOT reached (%d/%d reachable) for seq=%d; rolled back", n.nodeID, acks, totalReachable, prevSeq)
 	return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: "Could not replicate to majority"}, nil
 }
 
