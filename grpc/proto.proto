@@ -67,6 +67,16 @@ message MakeNewLeaderResponse {
   string message = 2;
 }
 
+message RequestVoteRequest {
+  int64 Term = 1;
+  string CandidateId = 2;
+  int64 LastSeq = 3; // last applied sequence number / log index for up-to-dateness check
+}
+
+message RequestVoteResponse {
+  int64 Term = 1;        // the responder's current term (may be updated)
+  bool VoteGranted = 2;  // true if vote granted to candidate
+}
 
 // auction service for clients
 service Auction {
@@ -76,6 +86,7 @@ service Auction {
 
 // internal replication service between nodes
 service Replication {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
   rpc MakeNewLeader(MakeNewLeaderRequest) returns (MakeNewLeaderResponse);
   rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
   rpc ReplicateBid(ReplicateBidRequest) returns (ReplicateBidResponse);

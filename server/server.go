@@ -201,6 +201,28 @@ func (n *AuctionNode) triggerElectionIfNeeded(failed string) {
 // Result RPC
 func (n *AuctionNode) Result(ctx context.Context, req *proto.ResultRequest) (*proto.ResultResponse, error) {
 	n.mutex.Lock()
+	if !n.isLeader {
+		leader := n.leaderAddress
+		conn := n.peerConns[leader]
+		n.mutex.Unlock()
+		if leader == "" {
+			return &proto.ResultResponse{AuctionOver: false, HighestBid: 0, Message: "No leader known"}, nil
+		}
+		if conn == nil {
+			var err error
+			conn, err = grpc.NewClient(leader, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				return &proto.ResultResponse{AuctionOver: false, HighestBid: 0, Message: fmt.Sprintf("Failed to connect to leader %s: %v", leader, err)}, nil
+			}
+			n.mutex.Lock()
+			n.peerConns[leader] = conn
+			n.mutex.Unlock()
+		}
+		client := proto.NewAuctionClient(conn)
+		rctx, cancel := context.WithTimeout(ctx, ReplicationTimeout)
+		defer cancel()
+		return client.Result(rctx, req)
+	}
 	defer n.mutex.Unlock()
 
 	log.Printf("[%s] Result query from %s", n.nodeID, req.BidderId)
@@ -509,10 +531,12 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 		}
 	}
 
-	// compute majority on reachable nodes only
 	totalConfigured := len(peerAddrs) + 1
 	totalReachable := len(reachable) + 1
-	majority := totalReachable/2 + 1
+	n.mutex.Lock()
+	totalNodes := 1 + len(n.peerConns) // leader + all configured peers
+	n.mutex.Unlock()
+	majority := totalNodes/2 + 1
 
 	log.Printf("[%s] configured peers=%d reachable peers=%d (including self), need majority=%d",
 		n.nodeID, totalConfigured-1, totalReachable-1, majority)
@@ -555,7 +579,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 		}
 
 		if acks >= majority {
-			// replicate async to remaining peers (best-effort)
+			// replicate async to peers
 			remaining := make([]string, 0, len(reachable))
 			for a := range reachable {
 				if !acked[a] {
