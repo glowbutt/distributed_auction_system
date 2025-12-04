@@ -79,60 +79,90 @@ func (n *AuctionNode) connectToPeers(peers []string) {
 		if a == "" {
 			continue
 		}
-		if c, err := grpc.NewClient(a, grpc.WithTransportCredentials(insecure.NewCredentials())); err == nil {
-			n.mutex.Lock()
-			n.peerConns[a] = c
-			n.mutex.Unlock()
-			log.Printf("[%s] connected %s", n.nodeID, a)
+		n.mutex.Lock()
+		// ensure an entry exists for this address (may be nil until connected)
+		if _, ok := n.peerConns[a]; !ok {
+			n.peerConns[a] = nil
 		}
+		n.mutex.Unlock()
+
+		// try connecting asynchronously so startup doesn't block
+		go func(addr string) {
+			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				log.Printf("[%s] initial connect to %s failed: %v", n.nodeID, addr, err)
+				return
+			}
+			n.mutex.Lock()
+			// store the connection
+			n.peerConns[addr] = conn
+			n.mutex.Unlock()
+			log.Printf("[%s] connected %s", n.nodeID, addr)
+		}(a)
 	}
 }
 
+// Replace existing Bid
 func (n *AuctionNode) Bid(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
 	n.mutex.Lock()
-	defer n.mutex.Unlock()
 	if time.Now().After(n.auctionEnd) {
+		n.mutex.Unlock()
 		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: "auction ended"}, nil
 	}
 	if !n.isLeader {
+		n.mutex.Unlock()
 		return n.forwardBidToLeader(ctx, req)
 	}
-	return n.processBid(req)
+	n.mutex.Unlock()
+	return n.processBid(ctx, req)
 }
 
+// Replace existing forwardBidToLeader
 func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
-	n.mutex.Unlock()
-	defer n.mutex.Lock()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		n.mutex.Lock()
 		leader := n.leaderAddress
 		conn := n.peerConns[leader]
 		n.mutex.Unlock()
+
 		if leader == "" {
 			n.triggerElectionIfNeeded("")
-		} else {
-			if conn == nil {
-				var err error
-				_, dc := context.WithTimeout(ctx, QuickTimeout)
-				conn, err = grpc.NewClient(leader, grpc.WithTransportCredentials(insecure.NewCredentials()))
-				dc()
-				if err != nil {
-					go n.triggerElectionIfNeeded(leader)
-					conn = nil
-				}
+			if time.Now().After(deadline) {
+				return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader unreachable"}, nil
 			}
-			if conn != nil {
-				client := proto.NewAuctionClient(conn)
-				rctx, rc := context.WithTimeout(ctx, ReplicationTimeout)
-				resp, err := client.Bid(rctx, req)
-				rc()
-				if err == nil {
-					return resp, nil
-				}
-				go n.triggerElectionIfNeeded(leader)
-			}
+			time.Sleep(150 * time.Millisecond)
+			continue
 		}
+
+		if conn == nil {
+			dctx, dcancel := context.WithTimeout(ctx, QuickTimeout)
+			connTmp, err := grpc.DialContext(dctx, leader, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+			dcancel()
+			if err != nil {
+				go n.triggerElectionIfNeeded(leader)
+				if time.Now().After(deadline) {
+					return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader unreachable"}, nil
+				}
+				time.Sleep(150 * time.Millisecond)
+				continue
+			}
+			n.mutex.Lock()
+			// store connection for reuse
+			n.peerConns[leader] = connTmp
+			n.mutex.Unlock()
+			conn = connTmp
+		}
+
+		client := proto.NewAuctionClient(conn)
+		rctx, rc := context.WithTimeout(ctx, ReplicationTimeout)
+		resp, err := client.Bid(rctx, req)
+		rc()
+		if err == nil {
+			return resp, nil
+		}
+		go n.triggerElectionIfNeeded(leader)
+
 		if time.Now().After(deadline) {
 			return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader unreachable"}, nil
 		}
@@ -198,34 +228,72 @@ func (n *AuctionNode) makeNewLeader(old string) {
 		n.mutex.Unlock()
 		return
 	}
+	n.lastElection = time.Now()
 	peers := make([]string, 0, len(n.peerConns))
 	for a := range n.peerConns {
 		if a != old {
 			peers = append(peers, a)
 		}
 	}
+	selfAddr := fmt.Sprintf("%s:%s", hostFallback, n.port)
 	n.mutex.Unlock()
-	newLeader := ""
+
+	candidates := make([]string, 0, len(peers)+1)
+	candidates = append(candidates, selfAddr)
 	for _, a := range peers {
-		if c, err := grpc.NewClient(a, grpc.WithTransportCredentials(insecure.NewCredentials())); err == nil && c != nil {
-			_ = c.Close()
-			newLeader = a
-			break
+		dctx, dcancel := context.WithTimeout(context.Background(), QuickTimeout)
+		conn, err := grpc.DialContext(dctx, a, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		dcancel()
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+		candidates = append(candidates, a)
+	}
+
+	if len(candidates) == 0 {
+		n.mutex.Lock()
+		prev := n.leaderAddress
+		n.leaderAddress = selfAddr
+		n.isLeader = true
+		n.mutex.Unlock()
+		log.Printf("[%s] leader %s -> %s (no candidates found, self elected)", n.nodeID, prev, selfAddr)
+		return
+	}
+
+	chosen := candidates[0]
+	for _, c := range candidates[1:] {
+		if c < chosen {
+			chosen = c
 		}
 	}
-	if newLeader == "" {
-		newLeader = fmt.Sprintf("%s:%s", hostFallback, n.port)
-	}
+
 	n.Bury(old)
 	n.mutex.Lock()
 	prev := n.leaderAddress
-	n.leaderAddress = newLeader
-	n.isLeader = (newLeader == fmt.Sprintf("%s:%s", hostFallback, n.port))
+	n.leaderAddress = chosen
+	n.isLeader = (chosen == selfAddr)
 	n.mutex.Unlock()
+
 	for _, a := range peers {
 		n.mutex.Lock()
 		c := n.peerConns[a]
 		n.mutex.Unlock()
+		if c == nil {
+			connTmp, err := grpc.NewClient(a, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				continue
+			}
+			n.mutex.Lock()
+			if existing, ok := n.peerConns[a]; !ok || existing == nil {
+				n.peerConns[a] = connTmp
+				c = connTmp
+			} else {
+				_ = connTmp.Close()
+				c = n.peerConns[a]
+			}
+			n.mutex.Unlock()
+		}
 		if c == nil {
 			continue
 		}
@@ -233,11 +301,11 @@ func (n *AuctionNode) makeNewLeader(old string) {
 			client := proto.NewReplicationClient(cc)
 			ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
 			defer cancel()
-			_, _ = client.MakeNewLeader(ctx, &proto.MakeNewLeaderRequest{Address: newLeader})
-			log.Printf("[%s] told %s -> leader=%s", n.nodeID, addr, newLeader)
+			_, _ = client.MakeNewLeader(ctx, &proto.MakeNewLeaderRequest{Address: chosen})
+			log.Printf("[%s] told %s -> leader=%s", n.nodeID, addr, chosen)
 		}(c, a)
 	}
-	log.Printf("[%s] leader %s -> %s", n.nodeID, prev, newLeader)
+	log.Printf("[%s] leader %s -> %s", n.nodeID, prev, chosen)
 }
 
 func (n *AuctionNode) MakeNewLeader(ctx context.Context, req *proto.MakeNewLeaderRequest) (*proto.MakeNewLeaderResponse, error) {
@@ -296,80 +364,180 @@ func (n *AuctionNode) RemovePeer(ctx context.Context, req *proto.RemovePeerReque
 	return &proto.RemovePeerResponse{Success: false, Message: "notfound"}, nil
 }
 
-func (n *AuctionNode) processBid(req *proto.BidRequest) (*proto.BidResponse, error) {
-	// Validate bid (under n.mutex from Bid)
+// Replace existing processBid (note new signature: takes ctx)
+func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
+	// validate & apply tentatively under lock
+	n.mutex.Lock()
 	if prev, ok := n.bids[req.BidderId]; ok && req.Amount <= prev {
-		return &proto.BidResponse{Status: proto.BidResponse_FAIL,
-			Message: fmt.Sprintf("must be higher than %d", prev)}, nil
+		n.mutex.Unlock()
+		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: fmt.Sprintf("must be higher than %d", prev)}, nil
 	}
 	if req.Amount <= n.highestBid {
-		return &proto.BidResponse{Status: proto.BidResponse_FAIL,
-			Message: fmt.Sprintf("must be higher than %d", n.highestBid)}, nil
+		n.mutex.Unlock()
+		return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: fmt.Sprintf("must be higher than %d", n.highestBid)}, nil
 	}
 
-	// snapshot of current state so we can roll back if quorum not reached
 	prevSeq := n.seq
 	prevHighest := n.highestBid
 	prevHighestBidder := n.highestBidder
 	prevBidValue, hadPrevBid := n.bids[req.BidderId]
 
-	// Tentatively apply locally
 	n.seq++
+	seq := n.seq
 	n.bids[req.BidderId] = req.Amount
 	n.highestBid = req.Amount
 	n.highestBidder = req.BidderId
 
-	// Replicate to followers and wait for majority
-	totalNodes := len(n.peerConns) + 1
-	majority := totalNodes/2 + 1
+	// snapshot peer addresses (not connections) under lock, then unlock for RPCs
+	peerAddrs := make([]string, 0, len(n.peerConns))
+	for a := range n.peerConns {
+		peerAddrs = append(peerAddrs, a)
+	}
+	n.mutex.Unlock()
 
-	if totalNodes == 1 {
-		log.Printf("[%s] only one node: quorum for (1/1), seq=%d bidder=%s amount=%d)",
-			n.nodeID, n.seq, req.BidderId, req.Amount)
-		return &proto.BidResponse{
-			Status:  proto.BidResponse_SUCCESS,
-			Message: fmt.Sprintf("Bid of %d accepted", req.Amount),
-		}, nil
+	// build reachable connections (dial if needed). reachable map only contains peers we can actually talk to now.
+	reachable := make(map[string]*grpc.ClientConn, len(peerAddrs))
+	for _, addr := range peerAddrs {
+		n.mutex.Lock()
+		conn := n.peerConns[addr]
+		n.mutex.Unlock()
+
+		if conn == nil {
+			dctx, dcancel := context.WithTimeout(ctx, QuickTimeout)
+			connTmp, err := grpc.DialContext(dctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+			dcancel()
+			if err != nil {
+				log.Printf("[%s] dial %s failed (treat as down): %v", n.nodeID, addr, err)
+				continue
+			}
+			n.mutex.Lock()
+			if existing, ok := n.peerConns[addr]; !ok || existing == nil {
+				n.peerConns[addr] = connTmp
+				conn = connTmp
+			} else {
+				_ = connTmp.Close()
+				conn = n.peerConns[addr]
+			}
+			n.mutex.Unlock()
+		}
+		if conn != nil {
+			reachable[addr] = conn
+		}
 	}
 
-	acks := 1 // count leader itself
-	log.Printf("[%s] Leader replicating seq=%d bidder=%s amount=%d; need majority %d/%d",
-		n.nodeID, n.seq, req.BidderId, req.Amount, majority, totalNodes)
+	// compute quorum based on reachable nodes only
+	totalConfigured := len(peerAddrs) + 1
+	totalReachable := len(reachable) + 1
+	majority := totalReachable/2 + 1
 
-	//contacting followers synchronously
-	for addr, conn := range n.peerConns {
-		if conn == nil {
-			continue
-		}
-		client := proto.NewReplicationClient(conn)
-		ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
-		resp, err := client.ReplicateBid(ctx, &proto.ReplicateBidRequest{
+	log.Printf("[%s] configured peers=%d reachable peers=%d (including self), need majority=%d",
+		n.nodeID, totalConfigured-1, totalReachable-1, majority)
+
+	if totalReachable == 1 {
+		log.Printf("[%s] only leader reachable: committed seq=%d bidder=%s amount=%d",
+			n.nodeID, seq, req.BidderId, req.Amount)
+		return &proto.BidResponse{Status: proto.BidResponse_SUCCESS, Message: fmt.Sprintf("Bid of %d accepted", req.Amount)}, nil
+	}
+
+	acks := 1
+	log.Printf("[%s] Leader replicating seq=%d bidder=%s amount=%d need %d/%d (reachable/configured %d/%d)",
+		n.nodeID, seq, req.BidderId, req.Amount, majority, totalReachable, totalReachable, totalConfigured)
+
+	acked := make(map[string]bool, len(reachable))
+
+	// replicate to each reachable peer (sequentially)
+	for addr, cc := range reachable {
+		log.Printf("[%s] sending replicate to %s seq=%d bidder=%s amount=%d", n.nodeID, addr, seq, req.BidderId, req.Amount)
+		rctx, rc := context.WithTimeout(ctx, ReplicationTimeout)
+		resp, err := proto.NewReplicationClient(cc).ReplicateBid(rctx, &proto.ReplicateBidRequest{
 			BidderId:       req.BidderId,
 			Amount:         req.Amount,
 			Timestamp:      time.Now().UnixNano(),
-			SequenceNumber: n.seq,
+			SequenceNumber: seq,
 		})
-		cancel()
-
+		rc()
 		if err == nil && resp != nil && resp.Success {
 			acks++
-			log.Printf("[%s] ACK from %s (%d/%d needed=%d) for seq=%d",
-				n.nodeID, addr, acks, totalNodes, majority, n.seq)
+			acked[addr] = true
+			log.Printf("[%s] ACK from %s (%d/%d) seq=%d", n.nodeID, addr, acks, totalReachable, seq)
 		} else {
-			log.Printf("[%s] replicate to %s failed for seq=%d: %v",
-				n.nodeID, addr, n.seq, err)
+			log.Printf("[%s] replicate to %s failed seq=%d: %v", n.nodeID, addr, seq, err)
+			// mark connection nil so future attempts will re-dial
+			n.mutex.Lock()
+			if c, ok := n.peerConns[addr]; ok && c == cc {
+				_ = c.Close()
+				n.peerConns[addr] = nil
+			}
+			n.mutex.Unlock()
 		}
 
 		if acks >= majority {
-			log.Printf("[%s] quorum reached (%d/%d) for seq=%d; committing",
-				n.nodeID, acks, totalNodes, n.seq)
-			return &proto.BidResponse{
-				Status:  proto.BidResponse_SUCCESS,
-				Message: fmt.Sprintf("Bid of %d accepted", req.Amount),
-			}, nil
+			// prepare list of remaining peers we haven't ACKed yet
+			remaining := make([]string, 0, len(reachable))
+			for a := range reachable {
+				if !acked[a] {
+					remaining = append(remaining, a)
+				}
+			}
+
+			// asynchronously replicate to remaining peers (don't block client)
+			go func(addrs []string, seqLocal int64, bidder string, amount int32) {
+				for _, a := range addrs {
+					// attempt dial/store if needed
+					n.mutex.Lock()
+					conn := n.peerConns[a]
+					n.mutex.Unlock()
+					if conn == nil {
+						dctx, dcancel := context.WithTimeout(context.Background(), QuickTimeout)
+						connTmp, err := grpc.DialContext(dctx, a, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+						dcancel()
+						if err != nil {
+							log.Printf("[%s] async dial %s failed: %v", n.nodeID, a, err)
+							continue
+						}
+						n.mutex.Lock()
+						if existing, ok := n.peerConns[a]; !ok || existing == nil {
+							n.peerConns[a] = connTmp
+							conn = connTmp
+						} else {
+							_ = connTmp.Close()
+							conn = n.peerConns[a]
+						}
+						n.mutex.Unlock()
+					}
+					if conn == nil {
+						continue
+					}
+					log.Printf("[%s] async sending replicate to %s seq=%d bidder=%s amount=%d", n.nodeID, a, seqLocal, bidder, amount)
+					rctx2, rc2 := context.WithTimeout(context.Background(), ReplicationTimeout)
+					resp2, err2 := proto.NewReplicationClient(conn).ReplicateBid(rctx2, &proto.ReplicateBidRequest{
+						BidderId:       bidder,
+						Amount:         amount,
+						Timestamp:      time.Now().UnixNano(),
+						SequenceNumber: seqLocal,
+					})
+					rc2()
+					if err2 == nil && resp2 != nil && resp2.Success {
+						log.Printf("[%s] async ACK from %s seq=%d", n.nodeID, a, seqLocal)
+					} else {
+						log.Printf("[%s] async replicate to %s failed seq=%d: %v", n.nodeID, a, seqLocal, err2)
+						n.mutex.Lock()
+						if c, ok := n.peerConns[a]; ok && c == conn {
+							_ = c.Close()
+							n.peerConns[a] = nil
+						}
+						n.mutex.Unlock()
+					}
+				}
+			}(remaining, seq, req.BidderId, req.Amount)
+
+			log.Printf("[%s] quorum reached (%d/%d) for seq=%d; committed", n.nodeID, acks, totalReachable, seq)
+			return &proto.BidResponse{Status: proto.BidResponse_SUCCESS, Message: fmt.Sprintf("Bid of %d accepted", req.Amount)}, nil
 		}
 	}
-	// quorum not reached: roll back tentative state
+
+	// quorum not reached -> rollback
+	n.mutex.Lock()
 	if hadPrevBid {
 		n.bids[req.BidderId] = prevBidValue
 	} else {
@@ -378,13 +546,10 @@ func (n *AuctionNode) processBid(req *proto.BidRequest) (*proto.BidResponse, err
 	n.highestBid = prevHighest
 	n.highestBidder = prevHighestBidder
 	n.seq = prevSeq
+	n.mutex.Unlock()
 
-	log.Printf("[%s] quorum NOT reached (%d/%d) for seq=%d; rolled back",
-		n.nodeID, acks, totalNodes, prevSeq)
-	return &proto.BidResponse{
-		Status:  proto.BidResponse_FAIL,
-		Message: "Could not replicate to majority",
-	}, nil
+	log.Printf("[%s] quorum NOT reached (%d/%d reachable) for seq=%d; rolled back", n.nodeID, acks, totalReachable, prevSeq)
+	return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: "Could not replicate to majority"}, nil
 }
 
 func (n *AuctionNode) replicateToFollowers(bidder string, amount int32, ts, seq int64) {
@@ -412,6 +577,7 @@ func (n *AuctionNode) replicateToFollowers(bidder string, amount int32, ts, seq 
 	}
 }
 
+// Replace existing ReplicateBid (follower-side)
 func (n *AuctionNode) ReplicateBid(ctx context.Context, req *proto.ReplicateBidRequest) (*proto.ReplicateBidResponse, error) {
 	n.mutex.Lock()
 	n.bids[req.BidderId] = req.Amount
@@ -419,14 +585,11 @@ func (n *AuctionNode) ReplicateBid(ctx context.Context, req *proto.ReplicateBidR
 		n.highestBid = req.Amount
 		n.highestBidder = req.BidderId
 	}
-	// Keep sequence monotonic by taking the max
 	if req.SequenceNumber > n.seq {
 		n.seq = req.SequenceNumber
 	}
-	log.Printf("[%s] follower applied replicate seq=%d bidder=%s amount=%d -> sending ACK",
-		n.nodeID, req.SequenceNumber, req.BidderId, req.Amount)
+	log.Printf("[%s] follower applied replicate seq=%d bidder=%s amount=%d -> sending ACK", n.nodeID, req.SequenceNumber, req.BidderId, req.Amount)
 	n.mutex.Unlock()
-
 	return &proto.ReplicateBidResponse{Success: true}, nil
 }
 

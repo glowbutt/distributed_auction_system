@@ -33,9 +33,13 @@ func NewAuctionClient(id, host string, port int) *AuctionClient {
 func (ac *AuctionClient) connect() error {
 	if ac.conn != nil {
 		_ = ac.conn.Close()
+		ac.conn = nil
+		ac.client = nil
 	}
-	conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", ac.host, ac.port), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	addr := fmt.Sprintf("%s:%d", ac.host, ac.port)
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
+		// try next port on failure
 		ac.port++
 		return err
 	}
@@ -49,11 +53,22 @@ func (ac *AuctionClient) Bid(amount int32) (*proto.BidResponse, error) {
 		if ac.client == nil {
 			_ = ac.connect()
 		}
+		if ac.client == nil {
+			// small backoff to avoid tight loop while rotating ports
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
 		resp, err := ac.client.Bid(ctx, &proto.BidRequest{BidderId: ac.id, Amount: amount})
 		cancel()
 		if err != nil {
+			// close and try next server
+			if ac.conn != nil {
+				_ = ac.conn.Close()
+			}
 			ac.client = nil
+			ac.conn = nil
+			ac.port++
 			continue
 		}
 		return resp, nil
@@ -65,11 +80,20 @@ func (ac *AuctionClient) Result() (*proto.ResultResponse, error) {
 		if ac.client == nil {
 			_ = ac.connect()
 		}
+		if ac.client == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
 		resp, err := ac.client.Result(ctx, &proto.ResultRequest{BidderId: ac.id})
 		cancel()
 		if err != nil {
+			if ac.conn != nil {
+				_ = ac.conn.Close()
+			}
 			ac.client = nil
+			ac.conn = nil
+			ac.port++
 			continue
 		}
 		return resp, nil
