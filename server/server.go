@@ -263,6 +263,17 @@ func (n *AuctionNode) startElection() {
 	totalNodes := len(peers) + 1
 	majority := totalNodes/2 + 1
 
+	// Become leader if only one node left
+	if totalNodes == 1 || len(peers) == 0 {
+		n.mutex.Lock()
+		n.leaderAddress = selfAddr
+		n.isLeader = true
+		n.votedFor = "" // clear votedFor once leader
+		n.mutex.Unlock()
+		log.Printf("[%s] only one node left -> auto leader %s", n.nodeID, selfAddr)
+		return
+	}
+
 	log.Printf("[%s] starting election term=%d peers=%d need=%d", n.nodeID, term, len(peers), majority)
 
 	votes := 1 // vote for self
@@ -533,10 +544,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 
 	totalConfigured := len(peerAddrs) + 1
 	totalReachable := len(reachable) + 1
-	n.mutex.Lock()
-	totalNodes := 1 + len(n.peerConns) // leader + all configured peers
-	n.mutex.Unlock()
-	majority := totalNodes/2 + 1
+	majority := totalReachable/2 + 1
 
 	log.Printf("[%s] configured peers=%d reachable peers=%d (including self), need majority=%d",
 		n.nodeID, totalConfigured-1, totalReachable-1, majority)
