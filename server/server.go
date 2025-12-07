@@ -1,3 +1,4 @@
+// File: auctionnode_fixed.go
 package main
 
 import (
@@ -21,25 +22,27 @@ const (
 	ReplicationTimeout = 10 * time.Second
 	QuickTimeout       = 2 * time.Second
 	electionCooldown   = 1 * time.Second
-	hostFallback       = "localhost"
 )
 
+// AuctionNode is the server node for the auction system.
 type AuctionNode struct {
 	proto.UnimplementedAuctionServer
 	proto.UnimplementedReplicationServer
 
-	mutex         sync.Mutex
-	nodeID        string
-	isLeader      bool
-	port          string
-	leaderAddress string
-	peerConns     map[string]*grpc.ClientConn
-	bids          map[string]int32
-	highestBid    int32
-	highestBidder string
-	auctionEnd    time.Time
-	seq           int64
-	lastElection  time.Time
+	mutex           sync.Mutex
+	nodeID          string
+	selfAddr        string   // canonical address for this node (host:port)
+	configuredPeers []string // configured peer addresses
+	isLeader        bool
+	port            string
+	leaderAddress   string
+	peerConns       map[string]*grpc.ClientConn
+	bids            map[string]int32
+	highestBid      int32
+	highestBidder   string
+	auctionEnd      time.Time
+	seq             int64
+	lastElection    time.Time
 
 	// election state
 	term     int64  // current term
@@ -47,28 +50,40 @@ type AuctionNode struct {
 }
 
 func main() {
-	id := flag.String("id", "node1", "")
-	port := flag.String("port", "8080", "")
-	leader := flag.Bool("leader", false, "")
-	leaderAddr := flag.String("leader-addr", "", "")
-	peers := flag.String("peers", "", "")
+	id := flag.String("id", "node1", "node id")
+	port := flag.String("port", "8080", "listening port")
+	addr := flag.String("addr", "", "address this node listens on (host:port). If empty defaults to localhost:<port>")
+	leader := flag.Bool("leader", false, "start as leader")
+	leaderAddr := flag.String("leader-addr", "", "leader address (host:port) if known")
+	peers := flag.String("peers", "", "comma separated list of peer addresses (host:port)")
 	flag.Parse()
+
+	if *addr == "" {
+		*addr = fmt.Sprintf("localhost:%s", *port)
+	}
 
 	pl := []string{}
 	if *peers != "" {
-		pl = strings.Split(*peers, ",")
+		for _, p := range strings.Split(*peers, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" && p != *addr {
+				pl = append(pl, p)
+			}
+		}
 	}
 
 	n := &AuctionNode{
-		nodeID:        *id,
-		isLeader:      *leader,
-		port:          *port,
-		leaderAddress: *leaderAddr,
-		peerConns:     map[string]*grpc.ClientConn{},
-		bids:          map[string]int32{},
-		auctionEnd:    time.Now().Add(AuctionDuration),
-		term:          0,
-		votedFor:      "",
+		nodeID:          *id,
+		isLeader:        *leader,
+		port:            *port,
+		leaderAddress:   *leaderAddr,
+		selfAddr:        *addr,
+		configuredPeers: pl,
+		peerConns:       map[string]*grpc.ClientConn{},
+		bids:            map[string]int32{},
+		auctionEnd:      time.Now().Add(AuctionDuration),
+		term:            0,
+		votedFor:        "",
 	}
 
 	lis, err := net.Listen("tcp", ":"+*port)
@@ -79,37 +94,57 @@ func main() {
 	proto.RegisterAuctionServer(s, n)
 	proto.RegisterReplicationServer(s, n)
 
+	// Ensure peerConns has entries for all configured peers (nil if not connected yet)
 	go func() {
-		time.Sleep(2 * time.Second)
-		n.connectToPeers(pl)
+		time.Sleep(1 * time.Second)
+		n.connectToPeers(n.configuredPeers)
 	}()
 
-	log.Printf("[%s] start port=%s leader=%v", n.nodeID, n.port, n.isLeader)
+	log.Printf("[%s] start addr=%s port=%s leader=%v peers=%v", n.nodeID, n.selfAddr, n.port, n.isLeader, n.configuredPeers)
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
 }
 
-// connectToPeers: best-effort initial connects; stores nil entries for peers
+// dial attempts to establish a grpc connection with a short timeout.
+func dial(addr string) (*grpc.ClientConn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), QuickTimeout)
+	defer cancel()
+	return grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+}
+
+// connectToPeers: best-effort initial connects; ensures configured peer keys exist in peerConns
 func (n *AuctionNode) connectToPeers(peers []string) {
+	// Ensure keys for configured peers exist
+	n.mutex.Lock()
 	for _, a := range peers {
-		if a == "" {
+		if a == "" || a == n.selfAddr {
 			continue
 		}
-		n.mutex.Lock()
 		if _, ok := n.peerConns[a]; !ok {
-			n.peerConns[a] = nil
+			n.peerConns[a] = nil // placeholder to indicate configured peer
 		}
-		n.mutex.Unlock()
+	}
+	n.mutex.Unlock()
+
+	for _, a := range peers {
+		if a == "" || a == n.selfAddr {
+			continue
+		}
 
 		// async connect
 		go func(addr string) {
-			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err := dial(addr)
 			if err != nil {
-				log.Printf("[%s] initial connect to %s failed: %v", n.nodeID, addr, err)
+				log.Printf("[%s] initial connect to %s failed: %v (keeping placeholder)", n.nodeID, addr, err)
+				// keep placeholder; don't delete so we know it's a configured peer
 				return
 			}
 			n.mutex.Lock()
+			// close any existing before replacing
+			if prev, ok := n.peerConns[addr]; ok && prev != nil {
+				_ = prev.Close()
+			}
 			n.peerConns[addr] = conn
 			n.mutex.Unlock()
 			log.Printf("[%s] connected %s", n.nodeID, addr)
@@ -117,7 +152,7 @@ func (n *AuctionNode) connectToPeers(peers []string) {
 	}
 }
 
-// Bid RPC
+// Bid RPC (client-facing)
 func (n *AuctionNode) Bid(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
 	n.mutex.Lock()
 	ended := time.Now().After(n.auctionEnd)
@@ -133,18 +168,39 @@ func (n *AuctionNode) Bid(ctx context.Context, req *proto.BidRequest) (*proto.Bi
 	return n.processBid(ctx, req)
 }
 
-// forwardBidToLeader forwards to the node in n.leaderAddress
-// If leader missing/unreachable it triggers an election and retries until deadline
+// forwardBidToLeader forwards to the node in n.leaderAddress.
+// If leader missing/unreachable it triggers an election and retries until deadline.
 func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		n.mutex.Lock()
 		leader := n.leaderAddress
+		self := n.selfAddr
 		conn := n.peerConns[leader]
+		isLeader := n.isLeader
 		n.mutex.Unlock()
 
+		// Defensive: if leader points to ourselves but we are not marked leader, trigger an election.
+		// If leader points to ourselves and we're marked leader, process locally.
+		if leader == self {
+			if isLeader {
+				// we're actually the leader — process locally
+				return n.processBid(ctx, req)
+			}
+			// leader advertise equals self but we aren't marked leader: try to recover by starting election
+			log.Printf("[%s] forwardBidToLeader: leader points to self but isLeader=false -> trigger election", n.nodeID)
+			go n.triggerElectionIfNeeded(leader)
+			// small backoff to allow election to progress
+			if time.Now().After(deadline) {
+				return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader unreachable"}, nil
+			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
 		if leader == "" {
-			n.triggerElectionIfNeeded("")
+			// no leader known -> try to elect
+			go n.triggerElectionIfNeeded("")
 			if time.Now().After(deadline) {
 				return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader unreachable"}, nil
 			}
@@ -152,10 +208,12 @@ func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequ
 			continue
 		}
 
+		// Try to create connection if missing or validate existing conn
 		if conn == nil {
-			connTmp, err := grpc.NewClient(leader, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			connTmp, err := dial(leader)
 			if err != nil {
 				// leader seems down; trigger election and retry
+				log.Printf("[%s] forward: connect to leader %s failed: %v", n.nodeID, leader, err)
 				go n.triggerElectionIfNeeded(leader)
 				if time.Now().After(deadline) {
 					return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader unreachable"}, nil
@@ -177,6 +235,7 @@ func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequ
 			return resp, nil
 		}
 		// remote failed: trigger election and retry
+		log.Printf("[%s] forward: Bid RPC to leader %s failed: %v", n.nodeID, leader, err)
 		go n.triggerElectionIfNeeded(leader)
 		if time.Now().After(deadline) {
 			return &proto.BidResponse{Status: proto.BidResponse_EXCEPTION, Message: "leader not reached"}, nil
@@ -188,17 +247,22 @@ func (n *AuctionNode) forwardBidToLeader(ctx context.Context, req *proto.BidRequ
 // triggerElectionIfNeeded: avoids frequent elections and starts one when appropriate
 func (n *AuctionNode) triggerElectionIfNeeded(failed string) {
 	n.mutex.Lock()
-	shouldStart := (n.leaderAddress == failed) && time.Since(n.lastElection) >= electionCooldown
-	if shouldStart {
-		n.lastElection = time.Now()
-	}
+	currLeader := n.leaderAddress
+	last := n.lastElection
 	n.mutex.Unlock()
+
+	shouldStart := (currLeader == "" || currLeader == failed) && time.Since(last) >= electionCooldown
 	if shouldStart {
+		n.mutex.Lock()
+		n.lastElection = time.Now()
+		n.mutex.Unlock()
 		go n.startElection()
+	} else {
+		log.Printf("[%s] triggerElectionIfNeeded: not starting election (currLeader=%q failed=%q lastElection=%v)", n.nodeID, currLeader, failed, last)
 	}
 }
 
-// Result RPC
+// Result RPC (client-facing)
 func (n *AuctionNode) Result(ctx context.Context, req *proto.ResultRequest) (*proto.ResultResponse, error) {
 	n.mutex.Lock()
 	if !n.isLeader {
@@ -210,7 +274,7 @@ func (n *AuctionNode) Result(ctx context.Context, req *proto.ResultRequest) (*pr
 		}
 		if conn == nil {
 			var err error
-			conn, err = grpc.NewClient(leader, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err = dial(leader)
 			if err != nil {
 				return &proto.ResultResponse{AuctionOver: false, HighestBid: 0, Message: fmt.Sprintf("Failed to connect to leader %s: %v", leader, err)}, nil
 			}
@@ -242,62 +306,79 @@ func (n *AuctionNode) Result(ctx context.Context, req *proto.ResultRequest) (*pr
 	return &proto.ResultResponse{AuctionOver: false, Winner: n.highestBidder, HighestBid: n.highestBid, Message: fmt.Sprintf("Auction ongoing. Highest bid: %d by %s", n.highestBid, n.highestBidder)}, nil
 }
 
-// startElection implements an election and becomes leader only if majority votes
-// should prevent split-brain by requiring majority
+// startElection implements an election and becomes leader only if majority votes.
+// Uses configuredPeers as the membership and verifies reachability with dial.
 func (n *AuctionNode) startElection() {
-	// Snapshot peers & state
+	// Snapshot state
 	n.mutex.Lock()
 	n.term++
 	term := n.term
-	selfAddr := fmt.Sprintf("%s:%s", hostFallback, n.port)
+	selfAddr := n.selfAddr
 	n.votedFor = selfAddr
 	n.lastElection = time.Now()
 
-	peers := make([]string, 0, len(n.peerConns))
-	for a := range n.peerConns {
+	peers := make([]string, 0, len(n.configuredPeers))
+	for _, a := range n.configuredPeers {
+		if a == "" || a == selfAddr {
+			continue
+		}
 		peers = append(peers, a)
 	}
 	mySeq := n.seq
 	n.mutex.Unlock()
 
-	totalNodes := len(peers) + 1
-	majority := totalNodes/2 + 1
-
-	// Become leader if only one node left
-	if totalNodes == 1 || len(peers) == 0 {
+	// Determine which peers are actually reachable right now by attempting connections
+	reachableConns := make(map[string]*grpc.ClientConn)
+	for _, addr := range peers {
+		connTmp, err := dial(addr)
+		if err != nil {
+			log.Printf("[%s] startElection: connect %s failed (treat as down): %v", n.nodeID, addr, err)
+			// mark as nil in peerConns (keep key)
+			n.mutex.Lock()
+			if c, ok := n.peerConns[addr]; ok && c != nil {
+				_ = c.Close()
+				n.peerConns[addr] = nil
+			}
+			if _, ok := n.peerConns[addr]; !ok {
+				n.peerConns[addr] = nil
+			}
+			n.mutex.Unlock()
+			continue
+		}
 		n.mutex.Lock()
+		if existing, ok := n.peerConns[addr]; ok && existing != nil {
+			_ = existing.Close()
+		}
+		n.peerConns[addr] = connTmp
+		reachableConns[addr] = connTmp
+		n.mutex.Unlock()
+	}
+
+	totalConfigured := len(peers) + 1
+	totalReachable := len(reachableConns) + 1 // include self
+	majority := totalConfigured/2 + 1
+
+	// If only this node is reachable (none of the configured peers answered dial), auto-elect.
+	if len(reachableConns) == 0 {
+		n.mutex.Lock()
+		prev := n.leaderAddress
 		n.leaderAddress = selfAddr
 		n.isLeader = true
-		n.votedFor = "" // clear votedFor once leader
+		n.votedFor = ""
 		n.mutex.Unlock()
-		log.Printf("[%s] only one node left -> auto leader %s", n.nodeID, selfAddr)
+		log.Printf("[%s] only one reachable node -> auto leader %s (configured_peers=%d) prevLeader=%s", n.nodeID, selfAddr, totalConfigured-1, prev)
+		// best-effort notify configured peers
+		go n.notifyPeersOfLeader(selfAddr, reachableConns)
 		return
 	}
 
-	log.Printf("[%s] starting election term=%d peers=%d need=%d", n.nodeID, term, len(peers), majority)
+	log.Printf("[%s] starting election term=%d configured_peers=%d reachable_peers=%d need_majority=%d",
+		n.nodeID, term, totalConfigured-1, totalReachable-1, majority)
 
 	votes := 1 // vote for self
 
-	for _, addr := range peers {
-		// prefer stored connection
-		n.mutex.Lock()
-		stored := n.peerConns[addr]
-		n.mutex.Unlock()
-
-		var conn *grpc.ClientConn
-		var oneOff bool
-		if stored != nil {
-			conn = stored
-		} else {
-			c, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-			if err != nil {
-				log.Printf("[%s] RequestVote: connect %s failed: %v", n.nodeID, addr, err)
-				continue
-			}
-			conn = c
-			oneOff = true
-		}
-
+	// Request votes from reachable peers only
+	for addr, conn := range reachableConns {
 		rctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
 		resp, err := proto.NewReplicationClient(conn).RequestVote(rctx, &proto.RequestVoteRequest{
 			Term:        term,
@@ -306,12 +387,14 @@ func (n *AuctionNode) startElection() {
 		})
 		cancel()
 
-		if oneOff {
-			_ = conn.Close()
-		}
-
 		if err != nil {
 			log.Printf("[%s] RequestVote RPC to %s failed: %v", n.nodeID, addr, err)
+			n.mutex.Lock()
+			if c, ok := n.peerConns[addr]; ok && c == conn {
+				_ = c.Close()
+				n.peerConns[addr] = nil
+			}
+			n.mutex.Unlock()
 			continue
 		}
 
@@ -329,7 +412,7 @@ func (n *AuctionNode) startElection() {
 
 		if resp.VoteGranted {
 			votes++
-			log.Printf("[%s] vote from %s (votes=%d/%d)", n.nodeID, addr, votes, totalNodes)
+			log.Printf("[%s] vote from %s (votes=%d/%d)", n.nodeID, addr, votes, totalConfigured)
 			if votes >= majority {
 				break
 			}
@@ -337,7 +420,7 @@ func (n *AuctionNode) startElection() {
 	}
 
 	if votes < majority {
-		log.Printf("[%s] election lost term=%d votes=%d/%d", n.nodeID, term, votes, totalNodes)
+		log.Printf("[%s] election lost term=%d votes=%d/%d (reachable/configured %d/%d)", n.nodeID, term, votes, totalConfigured, len(reachableConns), totalConfigured-1)
 		return
 	}
 
@@ -349,42 +432,71 @@ func (n *AuctionNode) startElection() {
 	n.votedFor = "" // clear votedFor once leader
 	n.mutex.Unlock()
 
-	log.Printf("[%s] WON election term=%d votes=%d/%d -> leader=%s", n.nodeID, term, votes, totalNodes, selfAddr)
+	log.Printf("[%s] WON election term=%d votes=%d/%d -> leader=%s (prev=%s)", n.nodeID, term, votes, totalConfigured, selfAddr, prev)
 
-	// notifying peers
-	for _, addr := range peers {
-		n.mutex.Lock()
-		stored := n.peerConns[addr]
-		n.mutex.Unlock()
-
-		var conn *grpc.ClientConn
-		var oneOff bool
-		if stored != nil {
-			conn = stored
-		} else {
-			c, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-			if err != nil {
-				log.Printf("[%s] notify %s failed connect: %v", n.nodeID, addr, err)
-				continue
-			}
-			conn = c
-			oneOff = true
-		}
-
+	// notifying reachable peers
+	for addr, conn := range reachableConns {
 		rctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
 		_, err := proto.NewReplicationClient(conn).MakeNewLeader(rctx, &proto.MakeNewLeaderRequest{Address: selfAddr})
 		cancel()
-		if oneOff {
-			_ = conn.Close()
-		}
 		if err != nil {
 			log.Printf("[%s] notify %s MakeNewLeader RPC failed: %v", n.nodeID, addr, err)
+			n.mutex.Lock()
+			if c, ok := n.peerConns[addr]; ok && c == conn {
+				_ = c.Close()
+				n.peerConns[addr] = nil
+			}
+			n.mutex.Unlock()
 			continue
 		}
 		log.Printf("[%s] told %s -> leader=%s", n.nodeID, addr, selfAddr)
 	}
+}
 
-	log.Printf("[%s] leader changed %s -> %s", n.nodeID, prev, n.leaderAddress)
+// notifyPeersOfLeader notifies configured peers (best-effort) about leader change.
+// reachableConns may contain already-open connections; we'll try others via dial.
+func (n *AuctionNode) notifyPeersOfLeader(newLeader string, reachableConns map[string]*grpc.ClientConn) {
+	n.mutex.Lock()
+	peers := append([]string{}, n.configuredPeers...)
+	n.mutex.Unlock()
+
+	for _, addr := range peers {
+		if addr == "" || addr == n.selfAddr {
+			continue
+		}
+		conn := reachableConns[addr]
+		if conn == nil {
+			var err error
+			conn, err = dial(addr)
+			if err != nil {
+				log.Printf("[%s] notifyPeersOfLeader: dial %s failed: %v", n.nodeID, addr, err)
+				continue
+			}
+			// store connection if configured
+			n.mutex.Lock()
+			if _, ok := n.peerConns[addr]; ok {
+				if existing := n.peerConns[addr]; existing != nil {
+					_ = existing.Close()
+				}
+				n.peerConns[addr] = conn
+			}
+			n.mutex.Unlock()
+		}
+		rctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
+		_, err := proto.NewReplicationClient(conn).MakeNewLeader(rctx, &proto.MakeNewLeaderRequest{Address: newLeader})
+		cancel()
+		if err != nil {
+			log.Printf("[%s] notifyPeersOfLeader: MakeNewLeader to %s failed: %v", n.nodeID, addr, err)
+			n.mutex.Lock()
+			if c, ok := n.peerConns[addr]; ok && c == conn {
+				_ = c.Close()
+				n.peerConns[addr] = nil
+			}
+			n.mutex.Unlock()
+			continue
+		}
+		log.Printf("[%s] notifyPeersOfLeader: told %s -> leader=%s", n.nodeID, addr, newLeader)
+	}
 }
 
 // MakeNewLeader RPC: follower updates leader info
@@ -395,10 +507,10 @@ func (n *AuctionNode) MakeNewLeader(ctx context.Context, req *proto.MakeNewLeade
 	n.mutex.Lock()
 	prev := n.leaderAddress
 	n.leaderAddress = req.Address
-	n.isLeader = (n.leaderAddress == fmt.Sprintf("%s:%s", hostFallback, n.port))
+	n.isLeader = (n.leaderAddress == n.selfAddr)
 	n.votedFor = ""
 	n.mutex.Unlock()
-	log.Printf("[%s] received MakeNewLeader -> leader=%s (prev=%s)", n.nodeID, req.Address, prev)
+	log.Printf("[%s] received MakeNewLeader -> leader=%s (prev=%s) isLeader=%v", n.nodeID, req.Address, prev, n.isLeader)
 	return &proto.MakeNewLeaderResponse{Success: true, Message: "ok"}, nil
 }
 
@@ -439,51 +551,8 @@ func (n *AuctionNode) RequestVote(ctx context.Context, req *proto.RequestVoteReq
 	return &proto.RequestVoteResponse{Term: n.term, VoteGranted: false}, nil
 }
 
-// Bury: request peers to remove an address (best-effort)
-func (n *AuctionNode) Bury(addr string) {
-	if addr == "" {
-		return
-	}
-	n.mutex.Lock()
-	conns := make(map[string]*grpc.ClientConn, len(n.peerConns))
-	for a, c := range n.peerConns {
-		conns[a] = c
-	}
-	n.mutex.Unlock()
-
-	for a, c := range conns {
-		go func(cc *grpc.ClientConn, peer string) {
-			client := proto.NewReplicationClient(cc)
-			ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
-			defer cancel()
-			_, _ = client.RemovePeer(ctx, &proto.RemovePeerRequest{Address: addr})
-		}(c, a)
-	}
-
-	n.mutex.Lock()
-	if c, ok := n.peerConns[addr]; ok {
-		_ = c.Close()
-		delete(n.peerConns, addr)
-	}
-	n.mutex.Unlock()
-}
-
-// RemovePeer RPC
-func (n *AuctionNode) RemovePeer(ctx context.Context, req *proto.RemovePeerRequest) (*proto.RemovePeerResponse, error) {
-	n.mutex.Lock()
-	defer n.mutex.Unlock()
-	if req == nil || req.Address == "" {
-		return &proto.RemovePeerResponse{Success: false, Message: "empty"}, nil
-	}
-	if c, ok := n.peerConns[req.Address]; ok {
-		_ = c.Close()
-		delete(n.peerConns, req.Address)
-		return &proto.RemovePeerResponse{Success: true, Message: "removed"}, nil
-	}
-	return &proto.RemovePeerResponse{Success: false, Message: "notfound"}, nil
-}
-
 // processBid replicates synchronously to a majority before confirming to client
+// Uses fresh dials to validate reachability so a dead follower won't be counted.
 func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*proto.BidResponse, error) {
 	// validate and apply under lock
 	n.mutex.Lock()
@@ -507,58 +576,59 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 	n.highestBid = req.Amount
 	n.highestBidder = req.BidderId
 
-	// snapshot peer addresses
-	peerAddrs := make([]string, 0, len(n.peerConns))
-	for a := range n.peerConns {
+	// snapshot configured peers (not peerConns keys)
+	peerAddrs := make([]string, 0, len(n.configuredPeers))
+	for _, a := range n.configuredPeers {
+		if a == "" || a == n.selfAddr {
+			continue
+		}
 		peerAddrs = append(peerAddrs, a)
 	}
 	n.mutex.Unlock()
 
-	// build reachable connections (use grpc.NewClient if needed)
+	// Attempt to establish fresh connections to configured peers (with QuickTimeout).
 	reachable := make(map[string]*grpc.ClientConn, len(peerAddrs))
 	for _, addr := range peerAddrs {
-		n.mutex.Lock()
-		conn := n.peerConns[addr]
-		n.mutex.Unlock()
-
-		if conn == nil {
-			connTmp, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-			if err != nil {
-				log.Printf("[%s] connect %s failed (treat as down): %v", n.nodeID, addr, err)
-				continue
-			}
+		connTmp, err := dial(addr)
+		if err != nil {
+			log.Printf("[%s] processBid: dial %s failed (treat as down): %v", n.nodeID, addr, err)
+			// ensure stored conn is cleared
 			n.mutex.Lock()
-			if existing, ok := n.peerConns[addr]; !ok || existing == nil {
-				n.peerConns[addr] = connTmp
-				conn = connTmp
-			} else {
-				_ = connTmp.Close()
-				conn = n.peerConns[addr]
+			if c, ok := n.peerConns[addr]; ok && c != nil {
+				_ = c.Close()
+				n.peerConns[addr] = nil
+			} else if _, ok := n.peerConns[addr]; !ok {
+				n.peerConns[addr] = nil
 			}
 			n.mutex.Unlock()
+			continue
 		}
-		if conn != nil {
-			reachable[addr] = conn
+
+		// store/replace connection for this peer
+		n.mutex.Lock()
+		if existing, ok := n.peerConns[addr]; ok && existing != nil {
+			_ = existing.Close()
 		}
+		n.peerConns[addr] = connTmp
+		n.mutex.Unlock()
+
+		reachable[addr] = connTmp
 	}
 
 	totalConfigured := len(peerAddrs) + 1
-	totalReachable := len(reachable) + 1
-	majority := totalReachable/2 + 1
+	majority := totalConfigured/2 + 1
 
 	log.Printf("[%s] configured peers=%d reachable peers=%d (including self), need majority=%d",
-		n.nodeID, totalConfigured-1, totalReachable-1, majority)
+		n.nodeID, totalConfigured-1, len(reachable), majority)
 
-	if totalReachable == 1 {
-		log.Printf("[%s] only leader reachable: committed seq=%d bidder=%s amount=%d", n.nodeID, seq, req.BidderId, req.Amount)
+	// If no follower is actually reachable (no successful dials), commit locally immediately.
+	if len(reachable) == 0 {
+		log.Printf("[%s] only leader reachable (no successful dials): committed seq=%d bidder=%s amount=%d", n.nodeID, seq, req.BidderId, req.Amount)
 		return &proto.BidResponse{Status: proto.BidResponse_SUCCESS, Message: fmt.Sprintf("Bid of %d accepted", req.Amount)}, nil
 	}
 
 	acks := 1
 	acked := make(map[string]bool, len(reachable))
-
-	log.Printf("[%s] Leader replicating seq=%d bidder=%s amount=%d need %d/%d (reachable/configured %d/%d)",
-		n.nodeID, seq, req.BidderId, req.Amount, majority, totalReachable, totalReachable, totalConfigured)
 
 	// replicate sequentially, waiting for majority
 	for addr, cc := range reachable {
@@ -574,10 +644,10 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 		if err == nil && resp != nil && resp.Success {
 			acks++
 			acked[addr] = true
-			log.Printf("[%s] ACK from %s (%d/%d) seq=%d", n.nodeID, addr, acks, totalReachable, seq)
+			log.Printf("[%s] ACK from %s (%d/%d) seq=%d", n.nodeID, addr, acks, totalConfigured, seq)
 		} else {
 			log.Printf("[%s] replicate to %s failed seq=%d: %v", n.nodeID, addr, seq, err)
-			// close so future will re-create
+			// close so future will re-dial
 			n.mutex.Lock()
 			if c, ok := n.peerConns[addr]; ok && c == cc {
 				_ = c.Close()
@@ -587,7 +657,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 		}
 
 		if acks >= majority {
-			// replicate async to peers
+			// replicate async to peers that haven't ACKed yet
 			remaining := make([]string, 0, len(reachable))
 			for a := range reachable {
 				if !acked[a] {
@@ -600,7 +670,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 					conn := n.peerConns[a]
 					n.mutex.Unlock()
 					if conn == nil {
-						connTmp, err := grpc.NewClient(a, grpc.WithTransportCredentials(insecure.NewCredentials()))
+						connTmp, err := dial(a)
 						if err != nil {
 							log.Printf("[%s] async connect %s failed: %v", n.nodeID, a, err)
 							continue
@@ -641,7 +711,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 				}
 			}(remaining, seq, req.BidderId, req.Amount)
 
-			log.Printf("[%s] majority reached (%d/%d) for seq=%d; committed", n.nodeID, acks, totalReachable, seq)
+			log.Printf("[%s] majority reached (%d/%d) for seq=%d; committed", n.nodeID, acks, totalConfigured, seq)
 			return &proto.BidResponse{Status: proto.BidResponse_SUCCESS, Message: fmt.Sprintf("Bid of %d accepted", req.Amount)}, nil
 		}
 	}
@@ -658,7 +728,7 @@ func (n *AuctionNode) processBid(ctx context.Context, req *proto.BidRequest) (*p
 	n.seq = prevSeq
 	n.mutex.Unlock()
 
-	log.Printf("[%s] majority NOT reached (%d/%d reachable) for seq=%d; rolled back", n.nodeID, acks, totalReachable, prevSeq)
+	log.Printf("[%s] majority NOT reached (acks=%d required=%d) for seq=%d; rolled back", n.nodeID, acks, majority, prevSeq)
 	return &proto.BidResponse{Status: proto.BidResponse_FAIL, Message: "Could not replicate to majority"}, nil
 }
 
@@ -673,6 +743,26 @@ func (n *AuctionNode) replicateToFollowers(bidder string, amount int32, ts, seq 
 	n.mutex.Unlock()
 	success := 1
 	for a, c := range conns {
+		if c == nil {
+			// attempt dial
+			cc, err := dial(a)
+			if err != nil {
+				log.Printf("[%s] replicateToFollowers: dial %s failed: %v", n.nodeID, a, err)
+				continue
+			}
+			// store it
+			n.mutex.Lock()
+			if _, ok := n.peerConns[a]; ok && n.peerConns[a] == nil {
+				n.peerConns[a] = cc
+			} else {
+				_ = cc.Close()
+			}
+			n.mutex.Unlock()
+			c = n.peerConns[a]
+			if c == nil {
+				continue
+			}
+		}
 		client := proto.NewReplicationClient(c)
 		ctx, cancel := context.WithTimeout(context.Background(), ReplicationTimeout)
 		r, err := client.ReplicateBid(ctx, req)
@@ -694,6 +784,7 @@ func (n *AuctionNode) replicateToFollowers(bidder string, amount int32, ts, seq 
 // ReplicateBid RPC (follower-side)
 func (n *AuctionNode) ReplicateBid(ctx context.Context, req *proto.ReplicateBidRequest) (*proto.ReplicateBidResponse, error) {
 	n.mutex.Lock()
+	// Apply log entry idempotently
 	n.bids[req.BidderId] = req.Amount
 	if req.Amount > n.highestBid {
 		n.highestBid = req.Amount
